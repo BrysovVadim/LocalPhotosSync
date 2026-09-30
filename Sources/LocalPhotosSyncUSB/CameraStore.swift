@@ -180,6 +180,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let error = lastError.map { "\($0.domain) code=\($0.code)" } ?? "none"
         let catalog = catalogAggregates()
+        let catalogPaths = catalogPathInvariants()
         return [
             "LocalPhotosSync \(version) (\(build))",
             "macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
@@ -191,6 +192,10 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             "State: \(connectionState.rawValue)",
             "Ready: \(ready)",
             "Catalog: \(items.count) files",
+            "SDK catalog progress: \(camera?.contentCatalogPercentCompleted ?? 0)%",
+            "SDK direct mediaFiles files: \(catalogPaths.directMediaFileCount)",
+            "SDK recursive contents files: \(catalogPaths.contentsTreeFileCount)",
+            "SDK snapshot files absent from store.items: \(catalogPaths.snapshotFilesAbsentFromStore)",
             "Catalog UTType counts: images=\(catalog.images) movies=\(catalog.movies) other=\(catalog.other)",
             "originatingAssetID: files=\(catalog.originatingAssetFiles) distinctIDs=\(catalog.distinctOriginatingAssetIDs)",
             "groupUUID: files=\(catalog.groupUUIDFiles) groups=\(catalog.groupUUIDCount) bytes=\(catalog.groupUUIDBytes) imageAndMovieGroups=\(catalog.groupUUIDMixedMediaGroups)",
@@ -215,6 +220,41 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         let relatedUUIDCount: Int
         let relatedUUIDBytes: Int64
         let relatedUUIDMixedMediaGroups: Int
+    }
+
+    private struct CatalogPathInvariants {
+        let directMediaFileCount: Int
+        let contentsTreeFileCount: Int
+        let snapshotFilesAbsentFromStore: Int
+    }
+
+    private func catalogPathInvariants() -> CatalogPathInvariants {
+        guard let camera else {
+            return CatalogPathInvariants(directMediaFileCount: 0, contentsTreeFileCount: 0, snapshotFilesAbsentFromStore: 0)
+        }
+        var directFileIDs: Set<ObjectIdentifier> = []
+        for item in camera.mediaFiles ?? [] {
+            if let file = item as? ICCameraFile { directFileIDs.insert(ObjectIdentifier(file)) }
+        }
+
+        var visited: Set<ObjectIdentifier> = []
+        var treeFileIDs: Set<ObjectIdentifier> = []
+        func visit(_ nodes: [ICCameraItem]) {
+            for node in nodes {
+                guard visited.insert(ObjectIdentifier(node)).inserted else { continue }
+                if let file = node as? ICCameraFile { treeFileIDs.insert(ObjectIdentifier(file)) }
+                if let folder = node as? ICCameraFolder { visit(folder.contents ?? []) }
+            }
+        }
+        visit(camera.contents ?? [])
+
+        let sdkSnapshotFileIDs = directFileIDs.union(treeFileIDs)
+        let storeFileIDs = Set(items.map { ObjectIdentifier($0.file) })
+        return CatalogPathInvariants(
+            directMediaFileCount: directFileIDs.count,
+            contentsTreeFileCount: treeFileIDs.count,
+            snapshotFilesAbsentFromStore: sdkSnapshotFileIDs.subtracting(storeFileIDs).count
+        )
     }
 
     private struct MediaGroupAggregate {
