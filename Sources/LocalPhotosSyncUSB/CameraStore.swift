@@ -179,6 +179,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let error = lastError.map { "\($0.domain) code=\($0.code)" } ?? "none"
+        let catalog = catalogAggregates()
         return [
             "LocalPhotosSync \(version) (\(build))",
             "macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
@@ -190,10 +191,97 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             "State: \(connectionState.rawValue)",
             "Ready: \(ready)",
             "Catalog: \(items.count) files",
+            "Catalog UTType counts: images=\(catalog.images) movies=\(catalog.movies) other=\(catalog.other)",
+            "originatingAssetID: files=\(catalog.originatingAssetFiles) distinctIDs=\(catalog.distinctOriginatingAssetIDs)",
+            "groupUUID: files=\(catalog.groupUUIDFiles) groups=\(catalog.groupUUIDCount) bytes=\(catalog.groupUUIDBytes) imageAndMovieGroups=\(catalog.groupUUIDMixedMediaGroups)",
+            "relatedUUID: files=\(catalog.relatedUUIDFiles) groups=\(catalog.relatedUUIDCount) bytes=\(catalog.relatedUUIDBytes) imageAndMovieGroups=\(catalog.relatedUUIDMixedMediaGroups)",
             "Selected: \(selected.count)",
             "Imported this run: \(importedCount)",
             "Last error: \(error)"
         ].joined(separator: "\n")
+    }
+
+    private struct CatalogAggregates {
+        let images: Int
+        let movies: Int
+        let other: Int
+        let originatingAssetFiles: Int
+        let distinctOriginatingAssetIDs: Int
+        let groupUUIDFiles: Int
+        let groupUUIDCount: Int
+        let groupUUIDBytes: Int64
+        let groupUUIDMixedMediaGroups: Int
+        let relatedUUIDFiles: Int
+        let relatedUUIDCount: Int
+        let relatedUUIDBytes: Int64
+        let relatedUUIDMixedMediaGroups: Int
+    }
+
+    private struct MediaGroupAggregate {
+        var fileCount = 0
+        var bytes: Int64 = 0
+        var hasImage = false
+        var hasMovie = false
+
+        mutating func add(kind: CatalogMediaKind, bytes: Int64) {
+            fileCount += 1
+            self.bytes += max(0, bytes)
+            hasImage = hasImage || kind == .image
+            hasMovie = hasMovie || kind == .movie
+        }
+    }
+
+    private enum CatalogMediaKind { case image, movie, other }
+
+    private func catalogAggregates() -> CatalogAggregates {
+        var images = 0
+        var movies = 0
+        var other = 0
+        var originatingAssetIDs: Set<String> = []
+        var originatingAssetFiles = 0
+        var groups: [String: MediaGroupAggregate] = [:]
+        var related: [String: MediaGroupAggregate] = [:]
+
+        for item in items {
+            let kind: CatalogMediaKind
+            if let uti = item.file.uti, let type = UTType(uti), type.conforms(to: .image) {
+                kind = .image
+                images += 1
+            } else if let uti = item.file.uti, let type = UTType(uti), type.conforms(to: .movie) {
+                kind = .movie
+                movies += 1
+            } else {
+                kind = .other
+                other += 1
+            }
+
+            if let identifier = item.file.originatingAssetID, !identifier.isEmpty {
+                originatingAssetFiles += 1
+                originatingAssetIDs.insert(identifier)
+            }
+            if let identifier = item.file.groupUUID, !identifier.isEmpty {
+                groups[identifier, default: MediaGroupAggregate()].add(kind: kind, bytes: item.bytes)
+            }
+            if let identifier = item.file.relatedUUID, !identifier.isEmpty {
+                related[identifier, default: MediaGroupAggregate()].add(kind: kind, bytes: item.bytes)
+            }
+        }
+
+        return CatalogAggregates(
+            images: images,
+            movies: movies,
+            other: other,
+            originatingAssetFiles: originatingAssetFiles,
+            distinctOriginatingAssetIDs: originatingAssetIDs.count,
+            groupUUIDFiles: groups.values.reduce(0) { $0 + $1.fileCount },
+            groupUUIDCount: groups.count,
+            groupUUIDBytes: groups.values.reduce(0) { $0 + $1.bytes },
+            groupUUIDMixedMediaGroups: groups.values.filter { $0.hasImage && $0.hasMovie }.count,
+            relatedUUIDFiles: related.values.reduce(0) { $0 + $1.fileCount },
+            relatedUUIDCount: related.count,
+            relatedUUIDBytes: related.values.reduce(0) { $0 + $1.bytes },
+            relatedUUIDMixedMediaGroups: related.values.filter { $0.hasImage && $0.hasMovie }.count
+        )
     }
 
     var currentTransportLabel: String { transportLabel(camera) }
