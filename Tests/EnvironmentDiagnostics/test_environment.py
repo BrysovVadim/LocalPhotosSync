@@ -105,12 +105,15 @@ class BonjourParsingTests(unittest.TestCase):
             mock.patch.object(module.shutil, "which", side_effect=lambda tool: f"/usr/bin/{tool}"),
             mock.patch.object(module, "_run_ioreg", return_value=(2, "ok")),
             mock.patch.object(module, "_run_bonjour", return_value=(1, "window_complete")),
+            mock.patch.object(module, "_run_usbmuxd", return_value=({"usb": 1, "network": 1, "unknown": 0}, "ok")),
         ):
             import json
             rendered = json.dumps(module.diagnose())
         for private_value in ("UDID", "SerialNumber", "AA:BB:CC:DD:EE:FF", "Private iPhone Name", "192.0.2.1"):
             self.assertNotIn(private_value, rendered)
         self.assertIn('"count": 1', rendered)
+        self.assertIn('"usbmuxd_devices"', rendered)
+        self.assertIn('"usb": 1', rendered)
         self.assertNotIn("stdout", rendered)
 
     def test_parsed_usb_names_and_serials_never_enter_output(self):
@@ -122,12 +125,148 @@ class BonjourParsingTests(unittest.TestCase):
             mock.patch.object(module.shutil, "which", side_effect=lambda tool: f"/usr/bin/{tool}"),
             mock.patch.object(module.subprocess, "run", return_value=completed),
             mock.patch.object(module, "_run_bonjour", return_value=(0, "ok")),
+            mock.patch.object(module, "_run_usbmuxd", return_value=({"usb": 0, "network": 0, "unknown": 0}, "ok")),
         ):
             import json
             rendered = json.dumps(module.diagnose())
         self.assertIn('"count": 1', rendered)
         self.assertNotIn("Secret iPhone Name", rendered)
         self.assertNotIn("PRIVATE-SERIAL", rendered)
+
+
+class UsbmuxdInventoryTests(unittest.TestCase):
+    @staticmethod
+    def _response(payload, *, version=1, message=8, tag=None):
+        if tag is None:
+            tag = module.USBMUXD_TAG
+        return module.struct.pack("<IIII", 16 + len(payload), version, message, tag) + payload
+
+    @staticmethod
+    def _plist_payload():
+        return plistlib.dumps({
+            "DeviceList": [
+                {"Properties": {"ConnectionType": "USB", "UDID": "PRIVATE-UDID", "SerialNumber": "PRIVATE-SERIAL"}},
+                {"Properties": {"ConnectionType": "Network", "DeviceName": "Private Phone", "Address": "192.0.2.1"}},
+                {"Properties": {"ConnectionType": "Other"}},
+            ]
+        })
+
+    class FakeConnection:
+        def __init__(self, data, fragment=65536):
+            self.data = bytearray(data)
+            self.fragment = fragment
+            self.sent = b""
+            self.timeout = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def connect(self, path):
+            self.path = path
+
+        def sendall(self, data):
+            self.sent = data
+
+        def recv(self, size):
+            count = min(size, self.fragment, len(self.data))
+            result = bytes(self.data[:count])
+            del self.data[:count]
+            return result
+
+    def _run_with(self, connection):
+        with mock.patch.object(module.socket, "socket", return_value=connection):
+            return module._run_usbmuxd("/private/test-socket")
+
+    def test_fragmented_reply_counts_only_transport_types(self):
+        response = self._response(self._plist_payload())
+        connection = self.FakeConnection(response, fragment=3)
+
+        counts, status = self._run_with(connection)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(counts, {"usb": 1, "network": 1, "unknown": 1})
+        self.assertEqual(connection.path, "/private/test-socket")
+        length, version, message, tag = module.struct.unpack("<IIII", connection.sent[:16])
+        self.assertEqual((length, version, message, tag), (len(connection.sent), 1, 8, module.USBMUXD_TAG))
+        request = plistlib.loads(connection.sent[16:])
+        self.assertEqual(request["MessageType"], "ListDevices")
+        rendered = repr(counts)
+        for private in ("PRIVATE-UDID", "PRIVATE-SERIAL", "Private Phone", "192.0.2.1"):
+            self.assertNotIn(private, rendered)
+
+    def test_truncated_reply_is_an_error(self):
+        payload = self._plist_payload()
+        connection = self.FakeConnection(self._response(payload)[:-5])
+        self.assertEqual(self._run_with(connection), (None, "error"))
+
+    def test_invalid_reply_version_is_an_error(self):
+        response = self._response(self._plist_payload(), version=2)
+        self.assertEqual(self._run_with(self.FakeConnection(response)), (None, "error"))
+
+    def test_invalid_reply_tag_is_an_error(self):
+        response = self._response(self._plist_payload(), tag=module.USBMUXD_TAG + 1)
+        self.assertEqual(self._run_with(self.FakeConnection(response)), (None, "error"))
+
+    def test_oversized_payload_is_rejected_before_reading(self):
+        header = module.struct.pack("<IIII", 16 + module.USBMUXD_MAX_PAYLOAD + 1, 1, 8, module.USBMUXD_TAG)
+        connection = self.FakeConnection(header)
+        self.assertEqual(self._run_with(connection), (None, "error"))
+
+    def test_socket_timeout_is_reported_without_details(self):
+        class TimedOutConnection(self.FakeConnection):
+            def recv(self, size):
+                raise module.socket.timeout("PRIVATE-DEVICE-DATA")
+
+        connection = TimedOutConnection(b"")
+        counts, status = self._run_with(connection)
+        self.assertIsNone(counts)
+        self.assertEqual(status, "timeout")
+
+    def test_fragmented_reply_uses_one_overall_deadline(self):
+        response = self._response(self._plist_payload())
+        clock = [0.0]
+
+        class SlowFragmentConnection(self.FakeConnection):
+            def __init__(self, data):
+                super().__init__(data, fragment=8)
+                self.recv_calls = 0
+                self.timeouts = []
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+                super().settimeout(value)
+
+            def recv(self, size):
+                self.recv_calls += 1
+                result = super().recv(size)
+                clock[0] += 0.6
+                return result
+
+        connection = SlowFragmentConnection(response)
+        with (
+            mock.patch.object(module.socket, "socket", return_value=connection),
+            mock.patch.object(module.time, "monotonic", side_effect=lambda: clock[0]),
+        ):
+            counts, status = module._run_usbmuxd("/private/test-socket", timeout=1.0)
+
+        self.assertIsNone(counts)
+        self.assertEqual(status, "timeout")
+        self.assertEqual(connection.recv_calls, 2)
+        self.assertLess(connection.timeouts[-1], connection.timeouts[0])
+
+    def test_malformed_xml_reply_is_a_safe_error(self):
+        with self.assertRaisesRegex(ValueError, "malformed usbmuxd plist"):
+            module.count_usbmuxd_transports(b"<?xml version='1.0'?><plist><dict>")
+
+    def test_invalid_message_type_is_an_error(self):
+        response = self._response(self._plist_payload(), message=7)
+        self.assertEqual(self._run_with(self.FakeConnection(response)), (None, "error"))
 
 
 if __name__ == "__main__":

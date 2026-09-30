@@ -9,20 +9,28 @@ import platform
 import plistlib
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
+import time
 from typing import Iterable
+from xml.parsers.expat import ExpatError
 
 SERVICE_TYPE = "_apple-mobdev2._tcp."
 _EVENT_RE = re.compile(r"\b(Add|Rmv|Remove)\b", re.IGNORECASE)
 _PRODUCT_KEYS = {"usb product name", "kusbproductstring"}
+USBMUXD_SOCKET = "/var/run/usbmuxd"
+USBMUXD_TIMEOUT = 3.0
+USBMUXD_MAX_PAYLOAD = 1_048_576
+USBMUXD_TAG = 0x4C505301
 
 
 def count_usb_ios_products(plist_data: bytes) -> int:
     """Count recognizable iPhone/iPad/iPod product labels in an ioreg plist."""
     try:
         root = plistlib.loads(plist_data)
-    except (plistlib.InvalidFileException, ValueError, TypeError) as error:
+    except (plistlib.InvalidFileException, ValueError, TypeError, ExpatError) as error:
         raise ValueError("malformed ioreg plist") from error
 
     count = 0
@@ -132,21 +140,90 @@ def _run_bonjour(command: str, seconds: float) -> tuple[int | None, str]:
         return None, "error"
 
 
+def _set_remaining_timeout(connection: socket.socket, deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise socket.timeout("usbmuxd deadline expired")
+    connection.settimeout(remaining)
+
+
+def _recv_exact(connection: socket.socket, size: int, deadline: float) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < size:
+        _set_remaining_timeout(connection, deadline)
+        chunk = connection.recv(size - len(chunks))
+        if not chunk:
+            raise ValueError("truncated usbmuxd response")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def count_usbmuxd_transports(payload: bytes) -> dict[str, int]:
+    """Count transport kinds only; discard all device-identifying properties."""
+    try:
+        response = plistlib.loads(payload)
+    except (plistlib.InvalidFileException, ValueError, TypeError, ExpatError) as error:
+        raise ValueError("malformed usbmuxd plist") from error
+    if not isinstance(response, dict) or not isinstance(response.get("DeviceList"), list):
+        raise ValueError("invalid usbmuxd device list")
+    counts = {"usb": 0, "network": 0, "unknown": 0}
+    for device in response["DeviceList"]:
+        properties = device.get("Properties") if isinstance(device, dict) else None
+        connection_type = properties.get("ConnectionType") if isinstance(properties, dict) else None
+        if isinstance(connection_type, str) and connection_type.casefold() == "usb":
+            counts["usb"] += 1
+        elif isinstance(connection_type, str) and connection_type.casefold() == "network":
+            counts["network"] += 1
+        else:
+            counts["unknown"] += 1
+    return counts
+
+
+def _run_usbmuxd(socket_path: str = USBMUXD_SOCKET, timeout: float = USBMUXD_TIMEOUT) -> tuple[dict[str, int] | None, str]:
+    """Request only ListDevices using usbmuxd plist protocol v1/message 8."""
+    request = plistlib.dumps({"MessageType": "ListDevices", "ProgName": "LocalPhotosSync diagnostics"}, fmt=plistlib.FMT_XML)
+    packet = struct.pack("<IIII", 16 + len(request), 1, 8, USBMUXD_TAG) + request
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            deadline = time.monotonic() + timeout
+            _set_remaining_timeout(connection, deadline)
+            connection.connect(socket_path)
+            _set_remaining_timeout(connection, deadline)
+            connection.sendall(packet)
+            header = _recv_exact(connection, 16, deadline)
+            length, version, message, tag = struct.unpack("<IIII", header)
+            if version != 1 or message != 8 or tag != USBMUXD_TAG:
+                raise ValueError("invalid usbmuxd response header")
+            payload_length = length - 16
+            if payload_length < 0 or payload_length > USBMUXD_MAX_PAYLOAD:
+                raise ValueError("invalid usbmuxd response size")
+            payload = _recv_exact(connection, payload_length, deadline)
+            return count_usbmuxd_transports(payload), "ok"
+    except socket.timeout:
+        return None, "timeout"
+    except (OSError, ValueError, struct.error):
+        return None, "error"
+
+
 def diagnose(browse_seconds: float = 5.0) -> dict[str, object]:
     is_macos = platform.system() == "Darwin"
     ioreg_path = shutil.which("ioreg") if is_macos else None
     dns_sd_path = shutil.which("dns-sd") if is_macos else None
     usb_count, usb_status = (None, "unavailable")
     bonjour_count, bonjour_status = (None, "unavailable")
+    transport_counts, transport_status = (None, "unavailable")
     if ioreg_path:
         usb_count, usb_status = _run_ioreg(ioreg_path, timeout=5.0)
     if dns_sd_path:
         bonjour_count, bonjour_status = _run_bonjour(dns_sd_path, seconds=browse_seconds)
+    if is_macos:
+        transport_counts, transport_status = _run_usbmuxd()
     return {
         "macos_version": platform.mac_ver()[0] if is_macos else None,
         "tools": {"ioreg": bool(ioreg_path), "dns-sd": bool(dns_sd_path)},
         "usb_ios_products": {"count": usb_count, "status": usb_status},
         "bonjour_sync_services": {"count": bonjour_count, "status": bonjour_status},
+        "usbmuxd_devices": {"counts": transport_counts, "status": transport_status},
         "scope": "Discovery counts only; this does not grant access to the media library.",
     }
 

@@ -1,6 +1,5 @@
 import SwiftUI
 
-@main
 struct LocalPhotosSyncApp: App {
     @StateObject private var store = CameraStore()
 
