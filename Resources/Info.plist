@@ -11,6 +11,5 @@
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSCameraUsageDescription</key><string>Просмотр и сохранение фотографий с подключённого iPhone.</string>
-    <key>NSPhotoLibraryUsageDescription</key><string>Просмотр системной медиатеки «Фото» на Mac и сохранение выбранных фотографий и видео.</string>
 </dict>
 </plist>
