@@ -5,8 +5,13 @@ struct LocalPhotosSyncApp: App {
 
     var body: some Scene {
         WindowGroup("Фото с iPhone") {
-            LibraryView(store: store)
-                .frame(minWidth: 820, minHeight: 580)
+            TabView {
+                PhoneCatalogView()
+                    .tabItem { Label("Каталог iPhone", systemImage: "iphone") }
+                LibraryView(store: store)
+                    .tabItem { Label("Импорт по USB", systemImage: "cable.connector") }
+            }
+            .frame(minWidth: 820, minHeight: 580)
         }
         .defaultSize(width: 1060, height: 760)
     }
