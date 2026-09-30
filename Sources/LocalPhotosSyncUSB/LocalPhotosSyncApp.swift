@@ -79,10 +79,51 @@ private struct LibraryView: View {
             }
 
             if store.items.isEmpty {
+                Group {
+                    switch store.connectionState {
+                    case .waiting:
+                        ContentUnavailableView {
+                            Label("Подключите iPhone", systemImage: "iphone.and.arrow.forward")
+                        } description: {
+                            Text("Подключите кабель. Разблокируйте телефон и нажмите «Доверять» на iPhone, если появится запрос.")
+                        }
+                    case .unlock:
+                        ContentUnavailableView {
+                            Label("Разблокируйте iPhone", systemImage: "lock.open")
+                        } description: {
+                            Text("Оставьте iPhone разблокированным, пока Mac подключается к нему.")
+                        }
+                    case .catalog, .loading:
+                        VStack(spacing: 12) {
+                            ProgressView()
+                            Text("Получаем список файлов с iPhone…")
+                                .foregroundStyle(.secondary)
+                        }
+                    case .ready:
+                        ContentUnavailableView {
+                            Label("Доступных USB-файлов нет", systemImage: "photo.on.rectangle.angled")
+                        } description: {
+                            Text("Для этого iPhone через кабель сейчас не удалось получить доступные файлы.")
+                        }
+                    case .error:
+                        ContentUnavailableView {
+                            Label("Не удалось подключиться", systemImage: "exclamationmark.iphone")
+                        } description: {
+                            Text("Посмотрите сообщение об ошибке выше, проверьте кабель и доверие к Mac, затем нажмите «Подключиться снова».")
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if visible.isEmpty {
                 ContentUnavailableView {
-                    Label("Подключите iPhone", systemImage: "iphone.and.arrow.forward")
+                    Label("Ничего не найдено", systemImage: "magnifyingglass")
                 } description: {
-                    Text("1. Подключите кабель.\n2. Разблокируйте телефон.\n3. Нажмите «Доверять» на iPhone, если появится запрос.")
+                    Text("Очистите поиск или измените выбранный тип файлов.")
+                } actions: {
+                    Button("Сбросить поиск и тип") {
+                        query = ""
+                        filter = "Все"
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -108,7 +149,7 @@ private struct LibraryView: View {
                 if let archive = store.lastArchive {
                     Button("Открыть папку") { NSWorkspace.shared.open(archive) }
                 }
-                Button("Проверить папку переноса…") { store.verifyArchiveFolder() }
+                Button("Проверить папку архива…") { store.verifyArchiveFolder() }
                     .disabled(store.verifyingArchive || store.importing)
                 if store.importing {
                     Button("Отменить перенос") { store.cancelImport() }
@@ -117,6 +158,8 @@ private struct LibraryView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(!store.ready || store.selected.isEmpty || store.importing)
             }
+            Text("Для независимого архива выберите папку вне iCloud Drive.")
+                .font(.caption).foregroundStyle(.secondary)
             if !store.results.isEmpty {
                 ScrollView { Text(store.results).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
                     .frame(maxHeight: 70)
