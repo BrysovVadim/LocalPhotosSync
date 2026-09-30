@@ -57,6 +57,13 @@ class BonjourParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "malformed ioreg plist"):
             module.count_usb_ios_products(b"<not a plist>")
 
+    def test_usb_command_requests_properties_needed_for_product_labels(self):
+        tree = {"USB Product Name": "iPhone"}
+        completed = mock.Mock(returncode=0, stdout=plistlib.dumps(tree).decode())
+        with mock.patch.object(module.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(module._run_ioreg("/usr/sbin/ioreg", 5), (1, "ok"))
+            self.assertIn("-l", run.call_args.args[0])
+
     def test_usb_command_returns_null_on_malformed_plist(self):
         completed = mock.Mock(returncode=0, stdout="malformed")
         with mock.patch.object(module.subprocess, "run", return_value=completed):

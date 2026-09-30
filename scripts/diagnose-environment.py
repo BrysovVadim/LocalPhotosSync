@@ -93,7 +93,7 @@ def parse_bonjour_events(lines: Iterable[str], service_type: str = SERVICE_TYPE)
 def _run_ioreg(command: str, timeout: float) -> tuple[int | None, str]:
     try:
         result = subprocess.run(
-            [command, "-p", "IOUSB", "-a"],
+            [command, "-p", "IOUSB", "-a", "-l"],
             capture_output=True,
             text=True,
             timeout=timeout,
