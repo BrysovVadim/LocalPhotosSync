@@ -27,6 +27,17 @@ struct MediaItem: Identifiable {
         if let uti = file.uti, let type = UTType(uti) { return type.conforms(to: .movie) }
         return ["mov", "mp4", "m4v"].contains((name as NSString).pathExtension.lowercased())
     }
+    var isPhoto: Bool {
+        guard let uti = file.uti, let type = UTType(uti) else { return false }
+        return type.conforms(to: .image)
+    }
+}
+
+struct ProbeFileSelection {
+    let photoCount: Int
+    let videoCount: Int
+    let sourceBytes: Int64
+    var fileCount: Int { photoCount + videoCount }
 }
 
 @MainActor
@@ -67,6 +78,8 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
     @Published private(set) var importedCount = 0
     @Published private(set) var verifyingArchive = false
     @Published private(set) var verificationResults = ""
+    private(set) var deviceDiscoveryComplete = false
+    private(set) var sessionOpenResult = "not_attempted"
 
     private let browser = ICDeviceBrowser()
     private var camera: ICCameraDevice?
@@ -76,6 +89,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
     private var reconnectID: String?
     private var lastError: NSError?
     private var cancelRequested = false
+    private var accessRestricted = false
 
     override init() {
         super.init()
@@ -96,6 +110,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         catalog = [:]
         items = []
         selected = []
+        accessRestricted = false
         thumbnails.removeAllObjects()
         ready = false
         lastError = nil
@@ -103,7 +118,12 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         camera.delegate = self
         connectionState = .unlock
         status = "Подключение к \(camera.name ?? "устройству")… Разблокируйте iPhone."
-        camera.requestOpenSession()
+        requestOpenSession(camera)
+    }
+
+    private func requestOpenSession(_ device: ICCameraDevice) {
+        sessionOpenResult = "pending"
+        device.requestOpenSession()
     }
 
     func reconnect() {
@@ -116,7 +136,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             reconnectID = connectedID
             camera.requestCloseSession()
         } else {
-            camera.requestOpenSession()
+            requestOpenSession(camera)
         }
     }
 
@@ -163,7 +183,10 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             "LocalPhotosSync \(version) (\(build))",
             "macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
             "Devices: \(devices.count)",
+            "Transport: \(transportLabel(camera))",
             "Session: \(camera?.hasOpenSession == true ? "open" : "closed")",
+            "Session open attempt: \(sessionOpenResult)",
+            "Access restricted: \(accessRestricted)",
             "State: \(connectionState.rawValue)",
             "Ready: \(ready)",
             "Catalog: \(items.count) files",
@@ -171,6 +194,30 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             "Imported this run: \(importedCount)",
             "Last error: \(error)"
         ].joined(separator: "\n")
+    }
+
+    var currentTransportLabel: String { transportLabel(camera) }
+
+    private func transportLabel(_ device: ICDevice?) -> String {
+        guard let transport = device?.transportType else { return "other" }
+        if transport == ICDeviceTransport.transportTypeUSB.rawValue { return "USB" }
+        if transport == ICDeviceTransport.transportTypeTCPIP.rawValue { return "network" }
+        return "other"
+    }
+
+    @discardableResult
+    func selectProbeFiles(maxBytes: Int64) -> ProbeFileSelection? {
+        guard ready else { return nil }
+        let eligible = items.filter { $0.bytes > 0 && $0.bytes <= maxBytes }
+        guard let photo = eligible.filter(\.isPhoto).min(by: { $0.bytes < $1.bytes }) else {
+            selected = []
+            return nil
+        }
+        var chosen = [photo]
+        let video = eligible.filter(\.isVideo).min(by: { $0.bytes < $1.bytes })
+        if let video { chosen.append(video) }
+        selected = Set(chosen.map(\.id))
+        return ProbeFileSelection(photoCount: 1, videoCount: video.map { _ in 1 } ?? 0, sourceBytes: chosen.reduce(0) { $0 + $1.bytes })
     }
 
     func cancelImport() {
@@ -219,11 +266,19 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let parent = panel.url else { return }
+        importSelected(to: parent)
+    }
+
+    @discardableResult
+    func importSelected(to parent: URL, includeSidecars: Bool = true) -> URL? {
+        guard ready, !importing, let sourceCamera = camera, sourceCamera.hasOpenSession else { return nil }
+        let batch = items.filter { selected.contains($0.id) }
+        guard !batch.isEmpty else { return nil }
         let startedAt = Date()
         let stamp = ISO8601DateFormatter().string(from: startedAt).replacingOccurrences(of: ":", with: "-")
         let directory = parent.appendingPathComponent("LocalPhotosSync-\(stamp)-\(UUID().uuidString.prefix(8))", isDirectory: true)
         do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false) }
-        catch { results = "Не удалось создать папку: \(error.localizedDescription)"; return }
+        catch { results = "Не удалось создать папку: \(error.localizedDescription)"; return nil }
         importing = true
         cancelRequested = false
         importedCount = 0
@@ -252,7 +307,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
                     // Separate directories prevent duplicate names and sidecars from overwriting earlier files.
                     let destination = directory.appendingPathComponent(String(format: "%05d", index + 1), isDirectory: true)
                     try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
-                    let filename = try await download(item.file, to: destination)
+                    let filename = try await download(item.file, to: destination, includeSidecars: includeSidecars)
                     let url = destination.appendingPathComponent((filename as NSString).lastPathComponent)
                     let sourceName = item.name
                     let sourceBytes = item.bytes
@@ -300,18 +355,23 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             let summary = finishedBatch && errors.isEmpty ? "Файлы и отчёт сохранены. Исходники на iPhone не изменены." : errors.joined(separator: "\n")
             results = summary
         }
+        return directory
     }
 
-    private func download(_ file: ICCameraFile, to directory: URL) async throws -> String {
+    static func downloadOptions(to directory: URL, includeSidecars: Bool) -> [ICDownloadOption: Any] {
+        [
+            .downloadsDirectoryURL: directory,
+            .overwrite: false,
+            .deleteAfterSuccessfulDownload: false,
+            .sidecarFiles: includeSidecars,
+        ]
+    }
+
+    private func download(_ file: ICCameraFile, to directory: URL, includeSidecars: Bool) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             let ticket = DownloadTicket(continuation)
             activeDownload = ticket
-            ticket.progress = file.requestDownload(options: [
-                .downloadsDirectoryURL: directory,
-                .overwrite: false,
-                .deleteAfterSuccessfulDownload: false,
-                .sidecarFiles: true,
-            ]) { filename, error in
+            ticket.progress = file.requestDownload(options: Self.downloadOptions(to: directory, includeSidecars: includeSidecars)) { filename, error in
                 Task { @MainActor in
                     if let error { ticket.finish(.failure(error)) }
                     else if let filename { ticket.finish(.success(filename)) }
@@ -324,18 +384,20 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
     private func lostAccess(_ device: ICDevice) {
         guard device === camera else { return }
         ready = false
-        connectionState = lastError == nil ? .unlock : .error
+        connectionState = accessRestricted || lastError?.code == -9943 ? .unlock : (lastError == nil ? .unlock : .error)
         activeDownload?.cancel()
         status = "Разблокируйте iPhone и проверьте кабель. Затем нажмите «Подключиться снова»."
     }
 
     func deviceBrowser(_ browser: ICDeviceBrowser, didAdd device: ICDevice, moreComing: Bool) {
+        deviceDiscoveryComplete = !moreComing
         guard let camera = device as? ICCameraDevice else { return }
         if !devices.contains(where: { $0 === camera }) { devices.append(camera) }
         if self.camera == nil { connect(deviceID(camera)) }
     }
 
     func deviceBrowser(_ browser: ICDeviceBrowser, didRemove device: ICDevice, moreGoing: Bool) {
+        deviceDiscoveryComplete = !moreGoing
         lostAccess(device)
         devices.removeAll { $0 === device }
         if device === camera {
@@ -345,6 +407,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             catalog = [:]
             items = []
             selected = []
+            accessRestricted = false
         }
     }
 
@@ -365,12 +428,30 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         guard device === camera else { return }
         if let error {
             lastError = error as NSError
-            connectionState = .error
-            status = "Не удалось открыть iPhone: \(error.localizedDescription)"
+            ready = false
+            let isLocked = (error as NSError).code == -9943
+            if isLocked { accessRestricted = true }
+            sessionOpenResult = isLocked ? "failed_passcode_locked" : "failed"
+            connectionState = isLocked ? .unlock : .error
+            status = isLocked ? "Разблокируйте iPhone, чтобы получить доступ к файлам." : "Не удалось открыть iPhone: \(error.localizedDescription)"
         } else {
-            lastError = nil
-            connectionState = .catalog
-            status = "Чтение списка файлов…"
+            guard device.hasOpenSession else {
+                ready = false
+                sessionOpenResult = "callback_without_open_session"
+                connectionState = .error
+                status = "Сессия iPhone не открылась. Нажмите «Подключиться снова»."
+                return
+            }
+            sessionOpenResult = "succeeded"
+            if accessRestricted {
+                ready = false
+                connectionState = .unlock
+                status = "Разблокируйте iPhone, чтобы восстановить доступ к файлам."
+            } else {
+                lastError = nil
+                connectionState = .catalog
+                status = "Чтение списка файлов…"
+            }
         }
     }
 
@@ -398,6 +479,13 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
 
     func deviceDidBecomeReady(withCompleteContentCatalog device: ICCameraDevice) {
         guard device === camera else { return }
+        guard device.hasOpenSession, !accessRestricted else {
+            ready = false
+            connectionState = accessRestricted ? .unlock : .error
+            return
+        }
+        lastError = nil
+        sessionOpenResult = "succeeded"
         collect(device.mediaFiles ?? [])
         publishCatalog()
         ready = true
@@ -405,10 +493,17 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         status = "Доступно \(items.count) файлов. Выберите несколько для первого переноса."
     }
 
-    func cameraDeviceDidEnableAccessRestriction(_ device: ICDevice) { lostAccess(device) }
+    func cameraDeviceDidEnableAccessRestriction(_ device: ICDevice) {
+        guard device === camera else { return }
+        accessRestricted = true
+        lostAccess(device)
+    }
     func cameraDeviceDidRemoveAccessRestriction(_ device: ICDevice) {
         guard device === camera else { return }
+        accessRestricted = false
         if let camera, camera.hasOpenSession {
+            lastError = nil
+            sessionOpenResult = "succeeded"
             ready = camera.contentCatalogPercentCompleted == 100
             connectionState = ready ? .ready : .loading
             status = ready ? "Доступ восстановлен. Файлов: \(items.count)." : "Чтение списка файлов…"

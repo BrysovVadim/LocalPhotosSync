@@ -1,4 +1,5 @@
 import Foundation
+import ImageCaptureCore
 import XCTest
 @testable import LocalPhotosSyncUSB
 
@@ -34,6 +35,88 @@ final class CommandLineTests: XCTestCase {
 
     func testDiagnoseRejectsDurationOverThirtySeconds() {
         XCTAssertThrowsError(try LocalPhotosSyncCLI.parse(["--diagnose", "--seconds", "31"]).get())
+    }
+
+    func testProbeImportDefaultsToSixtySeconds() throws {
+        let parent = URL(fileURLWithPath: "/tmp/photo archive", isDirectory: true).standardizedFileURL
+        XCTAssertEqual(try LocalPhotosSyncCLI.parse(["--probe-import", parent.path]).get(), .probeImport(parent: parent, seconds: 60))
+    }
+
+    func testProbeImportParsesCustomBoundedTimeout() throws {
+        let parent = URL(fileURLWithPath: "/tmp/archive", isDirectory: true).standardizedFileURL
+        XCTAssertEqual(try LocalPhotosSyncCLI.parse(["--probe-import", parent.path, "--seconds", "120"]).get(), .probeImport(parent: parent, seconds: 120))
+    }
+
+    func testProbeImportRejectsTimeoutBelowTenSeconds() {
+        XCTAssertThrowsError(try LocalPhotosSyncCLI.parse(["--probe-import", "/tmp", "--seconds", "9"]).get())
+    }
+
+    func testProbeImportRejectsTimeoutAboveOneHundredTwentySeconds() {
+        XCTAssertThrowsError(try LocalPhotosSyncCLI.parse(["--probe-import", "/tmp", "--seconds", "121"]).get())
+    }
+
+    func testProbeImportRejectsNonNumericTimeout() {
+        XCTAssertThrowsError(try LocalPhotosSyncCLI.parse(["--probe-import", "/tmp", "--seconds", "soon"]).get())
+    }
+
+    @MainActor
+    func testProbeArchiveVerificationCompletesWithinDeadline() throws {
+        let root = try makeArchive(completed: true, expectedCount: 1, errors: [])
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+
+        let result = awaitVerification(reportAt: root.appendingPathComponent("import-report.json"), deadline: deadline) { url in
+            do { return .success(try ArchiveVerification.verify(reportAt: url)) }
+            catch { return .failure(error.localizedDescription) }
+        }
+
+        guard case .complete(let verification) = result else { return XCTFail("Expected completed verification") }
+        XCTAssertTrue(verification.isValid)
+        XCTAssertEqual(verification.verifiedFiles, 1)
+    }
+
+    @MainActor
+    func testProbeArchiveVerificationHonorsOverallDeadline() {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let result = awaitVerification(reportAt: URL(fileURLWithPath: "/unused"), deadline: startedAt + 0.03) { _ in
+            Thread.sleep(forTimeInterval: 0.15)
+            return .success(ArchiveVerification(verifiedFiles: 1, failures: []))
+        }
+
+        guard case .timedOut = result else { return XCTFail("Expected deadline timeout") }
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - startedAt, 0.12)
+    }
+
+    func testProbeVerificationTimeoutLeavesReportIncomplete() throws {
+        let root = try makeArchive(completed: true, expectedCount: 1, errors: [])
+
+        LocalPhotosSyncCLI.markArchiveIncomplete(at: root, reason: "Probe timed out during archive verification.")
+
+        let report = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("import-report.json"))) as? [String: Any]
+        XCTAssertEqual(report?["completed"] as? Bool, false)
+        XCTAssertFalse(try ArchiveVerification.verify(reportAt: root.appendingPathComponent("import-report.json")).isValid)
+    }
+
+    @MainActor
+    func testProbeDownloadDisablesSidecarTransfer() {
+        let options = CameraStore.downloadOptions(to: URL(fileURLWithPath: "/tmp/probe"), includeSidecars: false)
+
+        XCTAssertEqual(options[.sidecarFiles] as? Bool, false)
+    }
+
+    @MainActor
+    func testRegularDownloadKeepsSidecarTransferEnabled() {
+        let options = CameraStore.downloadOptions(to: URL(fileURLWithPath: "/tmp/ui"), includeSidecars: true)
+
+        XCTAssertEqual(options[.sidecarFiles] as? Bool, true)
+    }
+
+    @MainActor
+    private func awaitVerification(
+        reportAt url: URL,
+        deadline: TimeInterval,
+        work: @escaping @Sendable (URL) -> LocalPhotosSyncCLI.VerificationWorkResult
+    ) -> LocalPhotosSyncCLI.DeadlineVerification {
+        LocalPhotosSyncCLI.waitForArchiveVerification(reportAt: url, deadline: deadline, work: work)
     }
 
     func testValidArchiveReturnsJSONAndSuccessCode() throws {

@@ -8,8 +8,22 @@ enum LocalPhotosSyncCLI {
         case help
         case verifyArchive(URL)
         case diagnose(seconds: Int)
+        case probeImport(parent: URL, seconds: Int)
     }
     enum ParseError: Error, Equatable { case message(String) }
+    enum DeadlineVerification {
+        case complete(ArchiveVerification)
+        case failed(String)
+        case timedOut
+    }
+    enum VerificationWorkResult: Sendable {
+        case success(ArchiveVerification)
+        case failure(String)
+    }
+    @MainActor
+    private final class VerificationBridge {
+        var result: VerificationWorkResult?
+    }
 
     struct Outcome {
         let exitCode: Int32
@@ -35,6 +49,20 @@ enum LocalPhotosSyncCLI {
             }
             return .success(.diagnose(seconds: seconds))
         }
+        if first == "--probe-import" {
+            guard arguments.count == 2 || arguments.count == 4, !arguments[1].isEmpty else {
+                return .failure(.message("Usage: LocalPhotosSyncUSB --probe-import <existing-parent-folder> [--seconds 10...120]"))
+            }
+            let seconds: Int
+            if arguments.count == 2 { seconds = 60 }
+            else {
+                guard arguments[2] == "--seconds", let parsed = Int(arguments[3]), (10...120).contains(parsed) else {
+                    return .failure(.message("Usage: LocalPhotosSyncUSB --probe-import <existing-parent-folder> [--seconds 10...120]"))
+                }
+                seconds = parsed
+            }
+            return .success(.probeImport(parent: URL(fileURLWithPath: arguments[1], isDirectory: true).standardizedFileURL, seconds: seconds))
+        }
         return .failure(.message("Unknown option: \(first). Use --help for usage."))
     }
 
@@ -44,6 +72,7 @@ enum LocalPhotosSyncCLI {
           LocalPhotosSyncUSB                 Launch the graphical app
           LocalPhotosSyncUSB --verify-archive <folder>
           LocalPhotosSyncUSB --diagnose [--seconds 0...30]
+          LocalPhotosSyncUSB --probe-import <existing-parent-folder> [--seconds 10...120]
           LocalPhotosSyncUSB --help
         """
     }
@@ -64,6 +93,135 @@ enum LocalPhotosSyncCLI {
         catch { return Outcome(exitCode: 2, stdout: "", stderr: error.localizedDescription) }
     }
 
+    @MainActor
+    static func probeImport(parent: URL, seconds: Int) -> Outcome {
+        var archive: URL?
+        var selectedCount = 0
+        guard (10...120).contains(seconds) else { return probeResult(archive: nil, selected: 0, imported: 0, verified: 0, valid: false, errors: ["invalid_timeout"]) }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: parent.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return probeResult(archive: nil, selected: 0, imported: 0, verified: 0, valid: false, errors: ["parent_folder_unavailable"])
+        }
+
+        let deadline = ProcessInfo.processInfo.systemUptime + TimeInterval(seconds)
+        let store = CameraStore()
+        while ProcessInfo.processInfo.systemUptime < deadline && !store.deviceDiscoveryComplete {
+            if store.devices.count > 1 {
+                return probeResult(archive: nil, selected: 0, imported: 0, verified: 0, valid: false, errors: ["multiple_devices_detected"])
+            }
+            pumpRunLoop(until: deadline)
+        }
+        guard store.deviceDiscoveryComplete, store.devices.count == 1 else {
+            return probeResult(archive: nil, selected: 0, imported: 0, verified: 0, valid: false, errors: [ProcessInfo.processInfo.systemUptime >= deadline ? "timeout_waiting_for_device" : "device_count_not_one"])
+        }
+        guard store.currentTransportLabel == "USB" else {
+            return probeResult(archive: nil, selected: 0, imported: 0, verified: 0, valid: false, errors: ["usb_transport_required"])
+        }
+        while ProcessInfo.processInfo.systemUptime < deadline && !store.ready {
+            if store.devices.count != 1 || store.currentTransportLabel != "USB" {
+                return probeResult(archive: nil, selected: 0, imported: 0, verified: 0, valid: false, errors: ["device_or_transport_changed"])
+            }
+            pumpRunLoop(until: deadline)
+        }
+        guard store.ready else {
+            return probeResult(archive: nil, selected: 0, imported: 0, verified: 0, valid: false, errors: ["timeout_waiting_for_catalog"])
+        }
+        guard store.devices.count == 1 else {
+            return probeResult(archive: nil, selected: 0, imported: 0, verified: 0, valid: false, errors: ["multiple_devices_detected"])
+        }
+        guard let selection = store.selectProbeFiles(maxBytes: 32 * 1024 * 1024) else {
+            return probeResult(archive: nil, selected: 0, imported: 0, verified: 0, valid: false, errors: ["eligible_photo_not_found"])
+        }
+        selectedCount = selection.fileCount
+        archive = store.importSelected(to: parent, includeSidecars: false)
+        guard let archive else {
+            return probeResult(archive: nil, selected: selectedCount, imported: 0, verified: 0, valid: false, errors: ["import_could_not_start"])
+        }
+        while store.importing && ProcessInfo.processInfo.systemUptime < deadline { pumpRunLoop(until: deadline) }
+        guard !store.importing else {
+            store.cancelImport()
+            return probeResult(archive: archive, selected: selectedCount, imported: store.importedCount, verified: 0, valid: false, errors: ["timeout_cancelled_import"], selectedPhotos: selection.photoCount, selectedVideos: selection.videoCount, selectedSourceBytes: selection.sourceBytes)
+        }
+        let verificationResult = waitForArchiveVerification(reportAt: archive.appendingPathComponent("import-report.json"), deadline: deadline) { url in
+            do { return .success(try ArchiveVerification.verify(reportAt: url)) }
+            catch { return .failure("archive_verification_error") }
+        }
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+            markArchiveIncomplete(at: archive, reason: "Probe timed out during archive verification.")
+            return probeResult(archive: archive, selected: selectedCount, imported: store.importedCount, verified: 0, valid: false, errors: ["timeout_verifying_archive"], selectedPhotos: selection.photoCount, selectedVideos: selection.videoCount, selectedSourceBytes: selection.sourceBytes)
+        }
+        switch verificationResult {
+        case .complete(let verification):
+            let valid = verification.isValid && verification.verifiedFiles == selectedCount && store.importedCount == selectedCount
+            return probeResult(
+                archive: archive,
+                selected: selectedCount,
+                imported: store.importedCount,
+                verified: verification.verifiedFiles,
+                valid: valid,
+                errors: valid ? [] : ["archive_verification_failed"],
+                selectedPhotos: selection.photoCount,
+                selectedVideos: selection.videoCount,
+                selectedSourceBytes: selection.sourceBytes
+            )
+        case .failed(let error):
+            return probeResult(archive: archive, selected: selectedCount, imported: store.importedCount, verified: 0, valid: false, errors: [error], selectedPhotos: selection.photoCount, selectedVideos: selection.videoCount, selectedSourceBytes: selection.sourceBytes)
+        case .timedOut:
+            markArchiveIncomplete(at: archive, reason: "Probe timed out during archive verification.")
+            return probeResult(archive: archive, selected: selectedCount, imported: store.importedCount, verified: 0, valid: false, errors: ["timeout_verifying_archive"], selectedPhotos: selection.photoCount, selectedVideos: selection.videoCount, selectedSourceBytes: selection.sourceBytes)
+        }
+    }
+
+    static func markArchiveIncomplete(at archive: URL, reason: String) {
+        let reportURL = archive.appendingPathComponent("import-report.json")
+        do {
+            var report = try JSONSerialization.jsonObject(with: Data(contentsOf: reportURL)) as? [String: Any] ?? [:]
+            report["completed"] = false
+            var errors = report["errors"] as? [String] ?? []
+            errors.append(reason)
+            report["errors"] = errors
+            let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: reportURL, options: .atomic)
+        } catch {
+            // The caller still reports timeout as failure if an unreadable report cannot be amended.
+        }
+    }
+
+    @MainActor
+    static func waitForArchiveVerification(
+        reportAt url: URL,
+        deadline: TimeInterval,
+        work: @escaping @Sendable (URL) -> VerificationWorkResult
+    ) -> DeadlineVerification {
+        guard ProcessInfo.processInfo.systemUptime < deadline else { return .timedOut }
+        let bridge = VerificationBridge()
+        Task.detached(priority: .utility) {
+            let result = work(url)
+            await MainActor.run { bridge.result = result }
+        }
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if case .some = bridge.result { break }
+            pumpRunLoop(until: deadline)
+        }
+        guard ProcessInfo.processInfo.systemUptime < deadline else { return .timedOut }
+        guard let result = bridge.result else { return .timedOut }
+        switch result {
+        case .success(let verification): return .complete(verification)
+        case .failure(let error): return .failed(error)
+        }
+    }
+
+    private static func pumpRunLoop(until deadline: TimeInterval) {
+        let remaining = deadline - ProcessInfo.processInfo.systemUptime
+        if remaining > 0 { _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: min(0.1, remaining))) }
+    }
+
+    private static func probeResult(archive: URL?, selected: Int, imported: Int, verified: Int, valid: Bool, errors: [String], selectedPhotos: Int = 0, selectedVideos: Int = 0, selectedSourceBytes: Int64 = 0) -> Outcome {
+        let result = ProbeImportResult(archivePath: archive?.path, selectedFiles: selected, selectedPhotos: selectedPhotos, selectedVideos: selectedVideos, selectedSourceBytes: selectedSourceBytes, importedFiles: imported, verifiedFiles: verified, valid: valid, errors: errors)
+        do { return Outcome(exitCode: valid ? 0 : 1, stdout: try encodeJSON(result), stderr: "") }
+        catch { return Outcome(exitCode: 1, stdout: "{\"archivePath\":null,\"selectedFiles\":0,\"selectedPhotos\":0,\"selectedVideos\":0,\"selectedSourceBytes\":0,\"importedFiles\":0,\"verifiedFiles\":0,\"valid\":false,\"errors\":[\"result_encoding_failed\"]}", stderr: "") }
+    }
+
     private static func encodeJSON<T: Encodable>(_ value: T) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
@@ -73,6 +231,17 @@ enum LocalPhotosSyncCLI {
     private struct VerificationResult: Encodable { let valid: Bool; let verifiedFiles: Int; let failures: [String] }
     private struct RuntimeError: Encodable { let error: String }
     private struct DiagnosticResult: Encodable { let diagnostics: String }
+    private struct ProbeImportResult: Encodable {
+        let archivePath: String?
+        let selectedFiles: Int
+        let selectedPhotos: Int
+        let selectedVideos: Int
+        let selectedSourceBytes: Int64
+        let importedFiles: Int
+        let verifiedFiles: Int
+        let valid: Bool
+        let errors: [String]
+    }
 }
 
 @main
@@ -94,6 +263,8 @@ private struct LocalPhotosSyncMain {
             let store = CameraStore()
             if seconds > 0 { RunLoop.main.run(until: Date(timeIntervalSinceNow: TimeInterval(seconds))) }
             emit(LocalPhotosSyncCLI.diagnosticResult(store.diagnostics()))
+        case .success(.probeImport(let parent, let seconds)):
+            emit(LocalPhotosSyncCLI.probeImport(parent: parent, seconds: seconds))
         }
     }
 
