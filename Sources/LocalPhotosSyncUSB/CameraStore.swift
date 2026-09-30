@@ -2,6 +2,21 @@ import AppKit
 import ImageCaptureCore
 import UniformTypeIdentifiers
 
+enum CameraConnectionState: String {
+    case waiting, unlock, catalog, loading, ready, error
+
+    var label: String {
+        switch self {
+        case .waiting: "Ожидание устройства"
+        case .unlock: "Разблокируйте iPhone"
+        case .catalog: "Подключено, получаем каталог"
+        case .loading: "Загружается список файлов"
+        case .ready: "Готово к просмотру и переносу"
+        case .error: "Ошибка подключения"
+        }
+    }
+}
+
 struct MediaItem: Identifiable {
     let id: String
     let file: ICCameraFile
@@ -27,10 +42,14 @@ private final class DownloadTicket {
         continuation.resume(with: result)
     }
 
-    func cancel() {
-        finish(.failure(ArchiveError.disconnected))
+    func cancel(with error: Error = ArchiveError.disconnected) {
+        finish(.failure(error))
         progress?.cancel()
     }
+}
+
+private struct ImportCancelledError: LocalizedError {
+    var errorDescription: String? { "Импорт отменён пользователем." }
 }
 
 @MainActor
@@ -40,10 +59,14 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
     @Published var selected: Set<String> = []
     @Published private(set) var connectedID = ""
     @Published private(set) var ready = false
+    @Published private(set) var connectionState: CameraConnectionState = .waiting
     @Published private(set) var importing = false
     @Published private(set) var status = "Подключите iPhone кабелем, разблокируйте его и подтвердите доверие к Mac."
     @Published private(set) var results = ""
     @Published private(set) var lastArchive: URL?
+    @Published private(set) var importedCount = 0
+    @Published private(set) var verifyingArchive = false
+    @Published private(set) var verificationResults = ""
 
     private let browser = ICDeviceBrowser()
     private var camera: ICCameraDevice?
@@ -51,6 +74,8 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
     private let thumbnails = NSCache<NSString, NSImage>()
     private var activeDownload: DownloadTicket?
     private var reconnectID: String?
+    private var lastError: NSError?
+    private var cancelRequested = false
 
     override init() {
         super.init()
@@ -73,8 +98,10 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         selected = []
         thumbnails.removeAllObjects()
         ready = false
-        guard let camera else { status = "Выберите подключённый iPhone."; return }
+        lastError = nil
+        guard let camera else { connectionState = .waiting; status = "Выберите подключённый iPhone."; return }
         camera.delegate = self
+        connectionState = .unlock
         status = "Подключение к \(camera.name ?? "устройству")… Разблокируйте iPhone."
         camera.requestOpenSession()
     }
@@ -82,6 +109,8 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
     func reconnect() {
         guard !importing, let camera else { return }
         ready = false
+        connectionState = .unlock
+        lastError = nil
         status = "Повторное подключение… Разблокируйте iPhone."
         if camera.hasOpenSession {
             reconnectID = connectedID
@@ -120,6 +149,65 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         return image
     }
 
+    func selectVisible(_ ids: [String]) {
+        guard !importing, ready else { return }
+        selected.formUnion(ids)
+    }
+
+    func diagnostics() -> String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        let error = lastError.map { "\($0.domain) code=\($0.code)" } ?? "none"
+        return [
+            "LocalPhotosSync \(version) (\(build))",
+            "macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
+            "Devices: \(devices.count)",
+            "Session: \(camera?.hasOpenSession == true ? "open" : "closed")",
+            "State: \(connectionState.rawValue)",
+            "Ready: \(ready)",
+            "Catalog: \(items.count) files",
+            "Selected: \(selected.count)",
+            "Imported this run: \(importedCount)",
+            "Last error: \(error)"
+        ].joined(separator: "\n")
+    }
+
+    func cancelImport() {
+        guard importing else { return }
+        cancelRequested = true
+        activeDownload?.cancel(with: ImportCancelledError())
+        status = "Отмена после завершения текущей проверки файла…"
+    }
+
+    func verifyArchiveFolder() {
+        guard !verifyingArchive else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Выберите папку переноса для проверки"
+        panel.prompt = "Проверить папку"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = false
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+        verifyingArchive = true
+        verificationResults = "Проверка файлов и контрольных сумм…"
+        Task {
+            let reportURL = directory.appendingPathComponent("import-report.json")
+            let outcome = await Task.detached(priority: .utility) { () -> Result<ArchiveVerification, Error> in
+                do { return .success(try ArchiveVerification.verify(reportAt: reportURL)) }
+                catch { return .failure(error) }
+            }.value
+            switch outcome {
+            case let .success(result):
+                let heading = result.isValid ? "Проверка пройдена." : "Проверка не пройдена или архив неполон."
+                verificationResults = "\(heading) Проверено файлов: \(result.verifiedFiles)." + (result.failures.isEmpty ? "" : "\n" + result.failures.joined(separator: "\n"))
+            case let .failure(error):
+                verificationResults = "Не удалось проверить папку: \(error.localizedDescription)"
+            }
+            verifyingArchive = false
+        }
+    }
+
     func importSelected() {
         guard ready, !importing, let sourceCamera = camera, sourceCamera.hasOpenSession else { return }
         let batch = items.filter { selected.contains($0.id) }
@@ -137,13 +225,27 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false) }
         catch { results = "Не удалось создать папку: \(error.localizedDescription)"; return }
         importing = true
+        cancelRequested = false
+        importedCount = 0
         results = ""
         lastArchive = directory
 
         Task {
             var receipts: [FileReceipt] = []
             var errors: [String] = []
+            var finishedBatch = false
+            do {
+                try ImportReport(startedAt: startedAt, files: receipts, errors: errors, expectedFileCount: batch.count, completed: false).write(to: directory)
+            } catch {
+                results = "Не удалось записать начальный отчёт: \(error.localizedDescription)"
+                importing = false
+                return
+            }
             for (index, item) in batch.enumerated() {
+                if cancelRequested {
+                    errors.append("Импорт отменён пользователем. Оставшиеся файлы не обрабатывались.")
+                    break
+                }
                 status = "Сохранение \(index + 1) из \(batch.count): \(item.name)"
                 do {
                     guard camera === sourceCamera, ready, sourceCamera.hasOpenSession else { throw ArchiveError.disconnected }
@@ -158,19 +260,45 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
                         try FileReceipt.verify(url: url, sourceName: sourceName, sourceBytes: sourceBytes)
                     }.value
                     receipts.append(receipt)
-                } catch { errors.append("\(item.name): \(error.localizedDescription)") }
-                do { try ImportReport(startedAt: startedAt, files: receipts, errors: errors).write(to: directory) }
-                catch { errors.append("Не удалось записать отчёт: \(error.localizedDescription)"); break }
-                if camera !== sourceCamera || !ready || !sourceCamera.hasOpenSession {
-                    results = "Телефон стал недоступен. Оставшиеся \(batch.count - index - 1) файлов не обрабатывались."
+                    importedCount = receipts.count
+                } catch {
+                    if !(error is ImportCancelledError) { lastError = error as NSError }
+                    errors.append("\(item.name): \(error.localizedDescription)")
+                }
+                if cancelRequested {
+                    errors.append("Импорт отменён пользователем после завершения текущей проверки. Архив неполон.")
+                    do { try ImportReport(startedAt: startedAt, files: receipts, errors: errors, expectedFileCount: batch.count, completed: false).write(to: directory) }
+                    catch { errors.append("Не удалось записать отчёт об отмене: \(error.localizedDescription)") }
                     break
+                }
+                if camera !== sourceCamera || !ready || !sourceCamera.hasOpenSession {
+                    errors.append("Телефон стал недоступен. Оставшиеся \(batch.count - index - 1) файлов не обрабатывались.")
+                    do { try ImportReport(startedAt: startedAt, files: receipts, errors: errors, expectedFileCount: batch.count, completed: false).write(to: directory) }
+                    catch { errors.append("Не удалось записать отчёт об отключении: \(error.localizedDescription)") }
+                    break
+                }
+                do { try ImportReport(startedAt: startedAt, files: receipts, errors: errors, expectedFileCount: batch.count, completed: false).write(to: directory) }
+                catch {
+                    errors.append("Не удалось записать промежуточный отчёт: \(error.localizedDescription)")
+                    try? ImportReport(startedAt: startedAt, files: receipts, errors: errors, expectedFileCount: batch.count, completed: false).write(to: directory)
+                    break
+                }
+                if index == batch.count - 1 { finishedBatch = true }
+            }
+            if finishedBatch {
+                do { try ImportReport(startedAt: startedAt, files: receipts, errors: errors, expectedFileCount: batch.count, completed: true).write(to: directory) }
+                catch {
+                    errors.append("Не удалось записать финальный отчёт: \(error.localizedDescription)")
+                    try? ImportReport(startedAt: startedAt, files: receipts, errors: errors, expectedFileCount: batch.count, completed: false).write(to: directory)
+                    finishedBatch = false
                 }
             }
             importing = false
             activeDownload = nil
+            cancelRequested = false
             status = "Сохранено: \(receipts.count) из \(batch.count). Ошибок: \(errors.count)."
-            let summary = errors.isEmpty ? "Файлы и отчёт сохранены. Исходники на iPhone не изменены." : errors.joined(separator: "\n")
-            results = results.isEmpty ? summary : summary + "\n" + results
+            let summary = finishedBatch && errors.isEmpty ? "Файлы и отчёт сохранены. Исходники на iPhone не изменены." : errors.joined(separator: "\n")
+            results = summary
         }
     }
 
@@ -196,6 +324,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
     private func lostAccess(_ device: ICDevice) {
         guard device === camera else { return }
         ready = false
+        connectionState = lastError == nil ? .unlock : .error
         activeDownload?.cancel()
         status = "Разблокируйте iPhone и проверьте кабель. Затем нажмите «Подключиться снова»."
     }
@@ -210,6 +339,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         lostAccess(device)
         devices.removeAll { $0 === device }
         if device === camera {
+            connectionState = .waiting
             camera = nil
             connectedID = ""
             catalog = [:]
@@ -227,20 +357,31 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             connectedID = ""
             connect(id)
         } else {
+            if let error { lastError = error as NSError; connectionState = .error }
             lostAccess(device)
         }
     }
     func device(_ device: ICDevice, didOpenSessionWithError error: Error?) {
         guard device === camera else { return }
-        if let error { status = "Не удалось открыть iPhone: \(error.localizedDescription)" }
-        else { status = "Чтение списка файлов…" }
+        if let error {
+            lastError = error as NSError
+            connectionState = .error
+            status = "Не удалось открыть iPhone: \(error.localizedDescription)"
+        } else {
+            lastError = nil
+            connectionState = .catalog
+            status = "Чтение списка файлов…"
+        }
     }
 
     func cameraDevice(_ camera: ICCameraDevice, didAdd items: [ICCameraItem]) {
         guard camera === self.camera else { return }
         collect(items)
         publishCatalog()
-        if !ready { status = "Чтение списка: найдено \(self.items.count) файлов…" }
+        if !ready {
+            connectionState = .loading
+            status = "Чтение списка: найдено \(self.items.count) файлов…"
+        }
     }
 
     func cameraDevice(_ camera: ICCameraDevice, didRemove items: [ICCameraItem]) {
@@ -260,6 +401,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         collect(device.mediaFiles ?? [])
         publishCatalog()
         ready = true
+        connectionState = .ready
         status = "Доступно \(items.count) файлов. Выберите несколько для первого переноса."
     }
 
@@ -268,6 +410,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         guard device === camera else { return }
         if let camera, camera.hasOpenSession {
             ready = camera.contentCatalogPercentCompleted == 100
+            connectionState = ready ? .ready : .loading
             status = ready ? "Доступ восстановлен. Файлов: \(items.count)." : "Чтение списка файлов…"
         }
     }

@@ -49,6 +49,14 @@ private struct LibraryView: View {
 
             Label(store.status, systemImage: store.ready ? "iphone.gen3" : "cable.connector")
                 .textSelection(.enabled)
+            HStack {
+                Text("Состояние: \(store.connectionState.label)").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Скопировать диагностику") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(store.diagnostics(), forType: .string)
+                }
+            }
             Text("Показаны файлы, доступные через USB. Снимки только в iCloud могут отсутствовать. Live Photo может отображаться отдельными фото и видео.")
                 .font(.callout).foregroundStyle(.secondary)
 
@@ -61,6 +69,14 @@ private struct LibraryView: View {
                 TextField("Поиск по имени файла", text: $query).textFieldStyle(.roundedBorder)
                 Button("Подключиться снова") { store.reconnect() }
                     .disabled(store.connectedID.isEmpty || store.importing)
+            }
+
+            HStack(spacing: 12) {
+                Button("Выбрать показанные (\(visible.count))") { store.selectVisible(visible.map(\.id)) }
+                    .disabled(!store.ready || visible.isEmpty || store.importing)
+                if store.importing { ProgressView().controlSize(.small) }
+                Text(store.importing ? "Перенесено: \(store.importedCount)" : "")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             if store.items.isEmpty {
@@ -93,6 +109,11 @@ private struct LibraryView: View {
                 if let archive = store.lastArchive {
                     Button("Открыть папку") { NSWorkspace.shared.open(archive) }
                 }
+                Button("Проверить папку переноса…") { store.verifyArchiveFolder() }
+                    .disabled(store.verifyingArchive || store.importing)
+                if store.importing {
+                    Button("Отменить перенос") { store.cancelImport() }
+                }
                 Button("Сохранить выбранные…") { store.importSelected() }
                     .buttonStyle(.borderedProminent)
                     .disabled(!store.ready || store.selected.isEmpty || store.importing)
@@ -100,6 +121,12 @@ private struct LibraryView: View {
             if !store.results.isEmpty {
                 ScrollView { Text(store.results).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
                     .frame(maxHeight: 70)
+            }
+            if !store.verificationResults.isEmpty {
+                ScrollView { Text(store.verificationResults).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
+                    .frame(maxHeight: 90)
+                Text("Проверка сверяет сохранённые файлы с локальным отчётом; полноту iPhone или iCloud медиатеки и Live Photo она не подтверждает.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Text("После переноса фото остаются на iPhone. Этот прототип не удаляет снимки и не управляет iCloud.")
                 .font(.caption).foregroundStyle(.secondary)
