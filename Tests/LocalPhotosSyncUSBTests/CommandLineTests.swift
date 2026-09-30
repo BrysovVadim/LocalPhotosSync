@@ -59,6 +59,57 @@ final class CommandLineTests: XCTestCase {
         XCTAssertThrowsError(try LocalPhotosSyncCLI.parse(["--probe-import", "/tmp", "--seconds", "soon"]).get())
     }
 
+    func testMacLibraryProbeDefaultsToNoPermissionPrompt() throws {
+        XCTAssertEqual(try LocalPhotosSyncCLI.parse(["--probe-mac-library"]).get(), .probeMacLibrary(requestAccess: false, seconds: 60))
+    }
+
+    func testMacLibraryProbeParsesExplicitAccessAndTimeout() throws {
+        XCTAssertEqual(try LocalPhotosSyncCLI.parse(["--probe-mac-library", "--request-access", "--seconds", "30"]).get(), .probeMacLibrary(requestAccess: true, seconds: 30))
+    }
+
+    func testMacLibraryProbeRejectsInvalidTimeout() {
+        XCTAssertThrowsError(try LocalPhotosSyncCLI.parse(["--probe-mac-library", "--seconds", "9"]).get())
+    }
+
+    func testMacLibraryProbeRejectsUnknownOptions() {
+        XCTAssertThrowsError(try LocalPhotosSyncCLI.parse(["--probe-mac-library", "--force"]).get())
+    }
+
+    func testMacLibraryNoAccessJSONDoesNotInventCounts() throws {
+        let outcome = MacPhotoLibraryProbe.accessRequiredOutcome(status: "denied", error: "photo_library_access_not_granted")
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(outcome.stdout.utf8)) as? [String: Any])
+        XCTAssertEqual(outcome.exitCode, 1)
+        XCTAssertEqual(json["source"] as? String, "mac_system_photos_library")
+        XCTAssertEqual(json["authorizationStatus"] as? String, "denied")
+        XCTAssertTrue(json["photos"] is NSNull)
+        XCTAssertTrue(json["videos"] is NSNull)
+        XCTAssertTrue(json["total"] is NSNull)
+    }
+
+    func testMacLibraryUnavailableReturnsNoCounts() throws {
+        let outcome = MacPhotoLibraryProbe.finalOutcome(status: "authorized", counts: (4, 2, 1), libraryUnavailable: true, deadlineExceeded: false)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(outcome.stdout.utf8)) as? [String: Any])
+        XCTAssertEqual(json["error"] as? String, "photo_library_unavailable")
+        XCTAssertTrue(json["photos"] is NSNull)
+        XCTAssertTrue(json["total"] is NSNull)
+    }
+
+    func testMacLibraryRevokedAuthorizationReturnsNoCounts() throws {
+        let outcome = MacPhotoLibraryProbe.finalOutcome(status: "denied", counts: (4, 2, 1), libraryUnavailable: false, deadlineExceeded: false)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(outcome.stdout.utf8)) as? [String: Any])
+        XCTAssertEqual(json["error"] as? String, "photo_library_access_not_granted")
+        XCTAssertTrue(json["photos"] is NSNull)
+        XCTAssertTrue(json["total"] is NSNull)
+    }
+
+    func testMacLibraryDeadlineDiscardsLateCounts() throws {
+        let outcome = MacPhotoLibraryProbe.finalOutcome(status: "authorized", counts: (4, 2, 1), libraryUnavailable: false, deadlineExceeded: true)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(outcome.stdout.utf8)) as? [String: Any])
+        XCTAssertEqual(json["error"] as? String, "deadline_exceeded")
+        XCTAssertTrue(json["photos"] is NSNull)
+        XCTAssertTrue(json["total"] is NSNull)
+    }
+
     @MainActor
     func testProbeArchiveVerificationCompletesWithinDeadline() throws {
         let root = try makeArchive(completed: true, expectedCount: 1, errors: [])

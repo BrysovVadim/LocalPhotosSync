@@ -9,6 +9,7 @@ enum LocalPhotosSyncCLI {
         case verifyArchive(URL)
         case diagnose(seconds: Int)
         case probeImport(parent: URL, seconds: Int)
+        case probeMacLibrary(requestAccess: Bool, seconds: Int)
     }
     enum ParseError: Error, Equatable { case message(String) }
     enum DeadlineVerification {
@@ -63,6 +64,28 @@ enum LocalPhotosSyncCLI {
             }
             return .success(.probeImport(parent: URL(fileURLWithPath: arguments[1], isDirectory: true).standardizedFileURL, seconds: seconds))
         }
+        if first == "--probe-mac-library" {
+            var requestAccess = false
+            var seconds = 60
+            var index = 1
+            while index < arguments.count {
+                switch arguments[index] {
+                case "--request-access":
+                    guard !requestAccess else { return .failure(.message("Duplicate --request-access")) }
+                    requestAccess = true
+                    index += 1
+                case "--seconds":
+                    guard index + 1 < arguments.count, let parsed = Int(arguments[index + 1]), (10...120).contains(parsed) else {
+                        return .failure(.message("Usage: LocalPhotosSyncUSB --probe-mac-library [--request-access] [--seconds 10...120]"))
+                    }
+                    seconds = parsed
+                    index += 2
+                default:
+                    return .failure(.message("Usage: LocalPhotosSyncUSB --probe-mac-library [--request-access] [--seconds 10...120]"))
+                }
+            }
+            return .success(.probeMacLibrary(requestAccess: requestAccess, seconds: seconds))
+        }
         return .failure(.message("Unknown option: \(first). Use --help for usage."))
     }
 
@@ -73,6 +96,7 @@ enum LocalPhotosSyncCLI {
           LocalPhotosSyncUSB --verify-archive <folder>
           LocalPhotosSyncUSB --diagnose [--seconds 0...30]
           LocalPhotosSyncUSB --probe-import <existing-parent-folder> [--seconds 10...120]
+          LocalPhotosSyncUSB --probe-mac-library [--request-access] [--seconds 10...120]
           LocalPhotosSyncUSB --help
         """
     }
@@ -265,6 +289,8 @@ private struct LocalPhotosSyncMain {
             emit(LocalPhotosSyncCLI.diagnosticResult(store.diagnostics()))
         case .success(.probeImport(let parent, let seconds)):
             emit(LocalPhotosSyncCLI.probeImport(parent: parent, seconds: seconds))
+        case .success(.probeMacLibrary(let requestAccess, let seconds)):
+            emit(MacPhotoLibraryProbe.run(requestAccess: requestAccess, seconds: seconds))
         }
     }
 

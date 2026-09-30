@@ -196,6 +196,9 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             "SDK direct mediaFiles files: \(catalogPaths.directMediaFileCount)",
             "SDK recursive contents files: \(catalogPaths.contentsTreeFileCount)",
             "SDK snapshot files absent from store.items: \(catalogPaths.snapshotFilesAbsentFromStore)",
+            "SDK snapshot files absent by UTI: images=\(catalogPaths.absentImages) movies=\(catalogPaths.absentMovies) audio=\(catalogPaths.absentAudio) other=\(catalogPaths.absentOther)",
+            "contents-only files with nonzero PTP handles: \(catalogPaths.treeOnlyNonzeroPTPHandles)",
+            "contents-only files matching flat list by unique nonzero PTP handle: \(catalogPaths.treeOnlyUniquePTPHandleMatches)",
             "Catalog UTType counts: images=\(catalog.images) movies=\(catalog.movies) other=\(catalog.other)",
             "originatingAssetID: files=\(catalog.originatingAssetFiles) distinctIDs=\(catalog.distinctOriginatingAssetIDs)",
             "groupUUID: files=\(catalog.groupUUIDFiles) groups=\(catalog.groupUUIDCount) bytes=\(catalog.groupUUIDBytes) imageAndMovieGroups=\(catalog.groupUUIDMixedMediaGroups)",
@@ -226,34 +229,74 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         let directMediaFileCount: Int
         let contentsTreeFileCount: Int
         let snapshotFilesAbsentFromStore: Int
+        let absentImages: Int
+        let absentMovies: Int
+        let absentAudio: Int
+        let absentOther: Int
+        let treeOnlyNonzeroPTPHandles: Int
+        let treeOnlyUniquePTPHandleMatches: Int
     }
 
     private func catalogPathInvariants() -> CatalogPathInvariants {
         guard let camera else {
-            return CatalogPathInvariants(directMediaFileCount: 0, contentsTreeFileCount: 0, snapshotFilesAbsentFromStore: 0)
+            return CatalogPathInvariants(directMediaFileCount: 0, contentsTreeFileCount: 0, snapshotFilesAbsentFromStore: 0, absentImages: 0, absentMovies: 0, absentAudio: 0, absentOther: 0, treeOnlyNonzeroPTPHandles: 0, treeOnlyUniquePTPHandleMatches: 0)
         }
-        var directFileIDs: Set<ObjectIdentifier> = []
+        var directFilesByID: [ObjectIdentifier: ICCameraFile] = [:]
         for item in camera.mediaFiles ?? [] {
-            if let file = item as? ICCameraFile { directFileIDs.insert(ObjectIdentifier(file)) }
+            if let file = item as? ICCameraFile { directFilesByID[ObjectIdentifier(file)] = file }
         }
 
         var visited: Set<ObjectIdentifier> = []
-        var treeFileIDs: Set<ObjectIdentifier> = []
+        var treeFilesByID: [ObjectIdentifier: ICCameraFile] = [:]
         func visit(_ nodes: [ICCameraItem]) {
             for node in nodes {
                 guard visited.insert(ObjectIdentifier(node)).inserted else { continue }
-                if let file = node as? ICCameraFile { treeFileIDs.insert(ObjectIdentifier(file)) }
+                if let file = node as? ICCameraFile { treeFilesByID[ObjectIdentifier(file)] = file }
                 if let folder = node as? ICCameraFolder { visit(folder.contents ?? []) }
             }
         }
         visit(camera.contents ?? [])
 
+        let directFileIDs = Set(directFilesByID.keys)
+        let treeFileIDs = Set(treeFilesByID.keys)
         let sdkSnapshotFileIDs = directFileIDs.union(treeFileIDs)
         let storeFileIDs = Set(items.map { ObjectIdentifier($0.file) })
+        let absentIDs = sdkSnapshotFileIDs.subtracting(storeFileIDs)
+        var absentImages = 0
+        var absentMovies = 0
+        var absentAudio = 0
+        var absentOther = 0
+        for identifier in absentIDs {
+            guard let file = directFilesByID[identifier] ?? treeFilesByID[identifier],
+                  let uti = file.uti,
+                  let type = UTType(uti) else {
+                absentOther += 1
+                continue
+            }
+            if type.conforms(to: .image) { absentImages += 1 }
+            else if type.conforms(to: .movie) { absentMovies += 1 }
+            else if type.conforms(to: .audio) { absentAudio += 1 }
+            else { absentOther += 1 }
+        }
+
+        let treeOnlyFiles = treeFileIDs.subtracting(directFileIDs).compactMap { treeFilesByID[$0] }
+        let directHandleCounts = Dictionary(grouping: directFilesByID.values.filter { $0.ptpObjectHandle != 0 }, by: \.ptpObjectHandle).mapValues(\.count)
+        let treeHandleCounts = Dictionary(grouping: treeFilesByID.values.filter { $0.ptpObjectHandle != 0 }, by: \.ptpObjectHandle).mapValues(\.count)
+        let treeOnlyNonzeroPTPHandles = treeOnlyFiles.filter { $0.ptpObjectHandle != 0 }.count
+        let treeOnlyUniquePTPHandleMatches = treeOnlyFiles.filter { file in
+            let handle = file.ptpObjectHandle
+            return handle != 0 && directHandleCounts[handle] == 1 && treeHandleCounts[handle] == 1
+        }.count
         return CatalogPathInvariants(
             directMediaFileCount: directFileIDs.count,
             contentsTreeFileCount: treeFileIDs.count,
-            snapshotFilesAbsentFromStore: sdkSnapshotFileIDs.subtracting(storeFileIDs).count
+            snapshotFilesAbsentFromStore: absentIDs.count,
+            absentImages: absentImages,
+            absentMovies: absentMovies,
+            absentAudio: absentAudio,
+            absentOther: absentOther,
+            treeOnlyNonzeroPTPHandles: treeOnlyNonzeroPTPHandles,
+            treeOnlyUniquePTPHandleMatches: treeOnlyUniquePTPHandleMatches
         )
     }
 
