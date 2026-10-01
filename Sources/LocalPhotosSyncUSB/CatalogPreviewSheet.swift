@@ -44,6 +44,7 @@ struct CatalogPreviewSheet: View {
                 Divider()
                 details(asset)
                     .padding(16)
+                Spacer(minLength: 0)
             } else {
                 ContentUnavailableView("Карточка недоступна", systemImage: "photo")
             }
