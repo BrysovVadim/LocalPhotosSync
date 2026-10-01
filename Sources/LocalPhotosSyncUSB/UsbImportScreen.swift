@@ -87,6 +87,7 @@ struct UsbImportScreen: View {
     @State private var filter = UsbImportTypeFilter.all
     @State private var anchor: String?
     @AppStorage("usb.tileSize") private var tileSize = PhoneCatalogTileSize.standard
+    @AppStorage("usb.oldestFirst") private var oldestFirst = false
 
     init(state: UsbImportScreenState, actions: UsbImportActions) {
         self.state = state
@@ -94,7 +95,8 @@ struct UsbImportScreen: View {
     }
 
     var body: some View {
-        let visible = UsbImportFiltering.visible(state.items, query: query, filter: filter)
+        let visible = DisplayOrder.apply(UsbImportFiltering.visible(state.items, query: query, filter: filter),
+                                         oldestFirst: oldestFirst)
         VStack(alignment: .leading, spacing: 0) {
             header
                 .padding(.horizontal, 20)
@@ -214,6 +216,7 @@ struct UsbImportScreen: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+            SortOrderButton(oldestFirst: $oldestFirst)
             Button("Выбрать показанные (\(visible.count))") {
                 actions.setSelection(state.selected.union(visible.map(\.id)))
             }

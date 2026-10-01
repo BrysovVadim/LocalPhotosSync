@@ -44,6 +44,20 @@ final class UsbImportScreenTests: XCTestCase {
         XCTAssertEqual(sections.flatMap { $0.items.map(\.id) }, items.map(\.id), "Order is preserved")
     }
 
+    func testTransferBadge() {
+        XCTAssertNil(TransferBadge.label(catalogExporting: false, usbImporting: false, processed: 0, total: 0))
+        XCTAssertEqual(TransferBadge.label(catalogExporting: false, usbImporting: true, processed: 2, total: 4), "2/4")
+        XCTAssertEqual(TransferBadge.label(catalogExporting: false, usbImporting: true, processed: 9, total: 4), "4/4")
+        XCTAssertEqual(TransferBadge.label(catalogExporting: false, usbImporting: true, processed: 0, total: 0), "↓")
+        XCTAssertEqual(TransferBadge.label(catalogExporting: true, usbImporting: false, processed: 0, total: 0), "↓")
+    }
+
+    func testDisplayOrderReversesForOldestFirst() {
+        XCTAssertEqual(DisplayOrder.apply([3, 2, 1], oldestFirst: false), [3, 2, 1])
+        XCTAssertEqual(DisplayOrder.apply([3, 2, 1], oldestFirst: true), [1, 2, 3])
+        XCTAssertEqual(DisplayOrder.apply([Int](), oldestFirst: true), [])
+    }
+
     func testStatusSummaryCollapsesLongReports() {
         XCTAssertEqual(StatusText.summary(of: "Одна строка").headline, "Одна строка")
         XCTAssertFalse(StatusText.summary(of: "a\nb\nc").isTruncated)

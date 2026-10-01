@@ -4,6 +4,7 @@ struct LocalPhotosSyncApp: App {
     @StateObject private var store = CameraStore()
     @StateObject private var exporter = PhoneAssetExporter()
     @StateObject private var history = ArchiveHistoryStore()
+    @State private var attention = TransferAttention()
 
     var body: some Scene {
         WindowGroup("Фото с iPhone") {
@@ -18,7 +19,10 @@ struct LocalPhotosSyncApp: App {
                     .tabItem { Label("Архивы", systemImage: "archivebox") }
             }
             .frame(minWidth: 820, minHeight: 580)
-            .onAppear { history.observe(exporter: exporter, camera: store) }
+            .onAppear {
+                history.observe(exporter: exporter, camera: store)
+                attention.observe(exporter: exporter, camera: store)
+            }
         }
         .defaultSize(width: 1060, height: 760)
     }

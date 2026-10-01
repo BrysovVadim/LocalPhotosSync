@@ -10,6 +10,7 @@ struct PhoneCatalogView: View {
     @Environment(\.isEnabled) private var isEnabled
     @State private var selectionAnchor: Int64?
     @State private var showOnlySelected = false
+    @AppStorage("catalog.oldestFirst") private var oldestFirst = false
     @State private var category = PhoneCatalogCategory.mediaLibrary
     @State private var type = PhoneCatalogTypeFilter.all
     @State private var search = ""
@@ -32,7 +33,8 @@ struct PhoneCatalogView: View {
     }
 
     private func filteredAssets(in snapshot: PhoneCatalogSnapshot) -> [PhoneCatalogAsset] {
-        let assets = snapshot.assets(category: category, type: type, search: search)
+        let assets = DisplayOrder.apply(snapshot.assets(category: category, type: type, search: search),
+                                        oldestFirst: oldestFirst)
         return showOnlySelected ? assets.filter { selected.contains($0.id) } : assets
     }
 
@@ -83,6 +85,7 @@ struct PhoneCatalogView: View {
             if selection.isEmpty { showOnlySelected = false }
         }
         .onChange(of: showOnlySelected) { _, _ in page = 0; selectionAnchor = nil }
+        .onChange(of: oldestFirst) { _, _ in page = 0; selectionAnchor = nil; thumbnails.supersede() }
         .onChange(of: reader.snapshot?.sourceFolder) { _, _ in
             page = 0
             selected.removeAll()
@@ -250,6 +253,7 @@ struct PhoneCatalogView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+            SortOrderButton(oldestFirst: $oldestFirst)
             Menu {
                 ForEach(months, id: \.firstIndex) { month in
                     Button("\(PhoneCatalogTimeline.title(for: month.start)) · \(month.count)") {
@@ -650,7 +654,7 @@ struct PhoneCatalogView: View {
 
     /// Everything that can make an automatic preview load possible or necessary.
     private var autoLoadKey: String {
-        [String(page), category.rawValue, type.rawValue, search, String(showOnlySelected), String(autoLoadPreviews), String(isEnabled),
+        [String(page), category.rawValue, type.rawValue, search, String(showOnlySelected), String(oldestFirst), String(autoLoadPreviews), String(isEnabled),
          String(thumbnails.isLoading), String(exporter.isExporting), String(reader.isRefreshing),
          String(reader.isLoadingSnapshot), reader.snapshot?.sourceFolder.path ?? ""].joined(separator: "|")
     }
