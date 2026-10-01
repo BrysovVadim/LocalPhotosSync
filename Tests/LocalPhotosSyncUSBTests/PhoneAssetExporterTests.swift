@@ -676,4 +676,15 @@ final class PhoneAssetExporterTests: XCTestCase {
             PhoneAssetExporter.runAvailabilityProbe(41, snapshot, 5, PhoneAssetExportCancellation(), scriptURL: script)
         }.value
     }
+
+    func testRunFolderNamesAreReadableAndDistinguishLivePhotos() {
+        let date = Date(timeIntervalSince1970: 1_790_000_000)
+        XCTAssertEqual(PhoneAssetExporter.runFolderName(livePhoto: false, at: date, suffix: "ABCDEF12-3456"),
+                       "LocalPhotosSync-2026-09-21T14-13-20Z-ABCDEF12")
+        XCTAssertEqual(PhoneAssetExporter.runFolderName(livePhoto: true, at: date, suffix: "ABCDEF12-3456"),
+                       "LocalPhotosSync-LivePhoto-2026-09-21T14-13-20Z-ABCDEF12")
+        XCTAssertNotEqual(PhoneAssetExporter.runFolderName(livePhoto: false), PhoneAssetExporter.runFolderName(livePhoto: false))
+        XCTAssertFalse(PhoneAssetExporter.runFolderName(livePhoto: false).contains(":"))
+    }
+
 }

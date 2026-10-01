@@ -286,6 +286,12 @@ final class PhoneAssetExporter: ObservableObject {
         }
     }
 
+    /// Readable, sortable and unique name for a transfer folder, in the same style as USB imports.
+    nonisolated static func runFolderName(livePhoto: Bool, at date: Date = Date(), suffix: String = UUID().uuidString) -> String {
+        let stamp = ISO8601DateFormatter().string(from: date).replacingOccurrences(of: ":", with: "-")
+        return "LocalPhotosSync-\(livePhoto ? "LivePhoto-" : "")\(stamp)-\(suffix.prefix(8))"
+    }
+
     nonisolated private static func performExport(
         assets: [PhoneCatalogAsset], snapshotFolder: URL, destination: URL,
         runner: @escaping ProbeRunner, cancellation: PhoneAssetExportCancellation
@@ -297,7 +303,7 @@ final class PhoneAssetExporter: ObservableObject {
                                            message: "Не удалось проверить каталог телефона или папку сохранения.")
         }
         let deadline = ProcessInfo.processInfo.systemUptime + 240
-        let runFolder = destination.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let runFolder = destination.appendingPathComponent(runFolderName(livePhoto: false), isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: runFolder, withIntermediateDirectories: false)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: runFolder.path)
@@ -445,7 +451,7 @@ final class PhoneAssetExporter: ObservableObject {
                 savedAssetIDs: [], failedAssetIDs: [asset.id], message: "Выбранная Live Photo недоступна или не поддерживается.")
         }
         let deadline = ProcessInfo.processInfo.systemUptime + 240
-        let runFolder = destination.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let runFolder = destination.appendingPathComponent(runFolderName(livePhoto: true), isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: runFolder, withIntermediateDirectories: false)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: runFolder.path)
