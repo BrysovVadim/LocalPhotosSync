@@ -277,7 +277,7 @@ final class ArchiveHistoryStore: ObservableObject {
     func verifyAll() { verify(records.map(\.id)) }
 
     /// Archives never checked, or last checked more than `days` days before `now`.
-    static func staleIDs(in records: [ArchiveRecord], olderThanDays days: Int, now: Date = Date()) -> [UUID] {
+    nonisolated static func staleIDs(in records: [ArchiveRecord], olderThanDays days: Int, now: Date = Date()) -> [UUID] {
         let limit = now.addingTimeInterval(-TimeInterval(max(0, days)) * 86_400)
         return records.filter { ($0.lastCheck?.at ?? .distantPast) < limit }.map(\.id)
     }
