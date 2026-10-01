@@ -6,6 +6,7 @@ struct ArchiveHistoryActions {
     var verify: (UUID) -> Void = { _ in }
     var addFolder: () -> Void = {}
     var reveal: (URL) -> Void = { _ in }
+    var openReport: (URL) -> Void = { _ in }
     var remove: (UUID) -> Void = { _ in }
 }
 
@@ -14,6 +15,14 @@ struct ArchiveHistorySummary: Equatable {
     let passed: Int
     let problems: Int
     let unchecked: Int
+
+    static func isProblem(_ state: ArchiveCheckState?, last: ArchiveLastCheck?) -> Bool {
+        switch state ?? .unchecked {
+        case .failed, .missing: return true
+        case .passed, .checking: return false
+        case .unchecked: return last?.outcome == .failed || last?.outcome == .missing
+        }
+    }
 
     init(records: [ArchiveRecord], checks: [UUID: ArchiveCheckState]) {
         total = records.count
@@ -44,6 +53,7 @@ struct ArchiveHistoryScreen: View {
     let message: String?
     let summaries: [UUID: ArchiveReportSummary]
     let actions: ArchiveHistoryActions
+    @State private var onlyProblems = false
 
     init(records: [ArchiveRecord], checks: [UUID: ArchiveCheckState], isChecking: Bool, message: String?,
          summaries: [UUID: ArchiveReportSummary] = [:], actions: ArchiveHistoryActions) {
@@ -76,10 +86,19 @@ struct ArchiveHistoryScreen: View {
                     Button("Добавить папку…") { actions.addFolder() }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if onlyProblems && shown.isEmpty {
+                ContentUnavailableView {
+                    Label("Проблем не найдено", systemImage: "checkmark.seal")
+                } description: {
+                    Text("Ни одна папка не помечена расхождениями или как ненайденная. Непроверенные папки здесь не показаны.")
+                } actions: {
+                    Button("Показать все") { onlyProblems = false }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(records) { record in
+                        ForEach(shown) { record in
                             row(record)
                             Divider()
                         }
@@ -109,7 +128,16 @@ struct ArchiveHistoryScreen: View {
             if summary.total > 0 {
                 countChip("Всего", value: summary.total, tint: .secondary)
                 countChip("В порядке", value: summary.passed, tint: .green)
-                countChip("Проблемы", value: summary.problems, tint: summary.problems > 0 ? .orange : .secondary)
+                Toggle(isOn: $onlyProblems) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Проблемы").font(.caption).foregroundStyle(.secondary)
+                        Text("\(summary.problems)").font(.callout.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(summary.problems > 0 ? Color.orange : Color.secondary)
+                    }
+                }
+                .toggleStyle(.button)
+                .help(onlyProblems ? "Показаны только папки с расхождениями или ненайденные. Нажмите, чтобы показать все." :
+                                     "Показать только папки с расхождениями или ненайденные.")
             }
             Button {
                 actions.addFolder()
@@ -134,6 +162,12 @@ struct ArchiveHistoryScreen: View {
             .disabled(isChecking || records.isEmpty)
             .help("Проверить все папки по их отчётам (⌘R).")
         }
+    }
+
+    /// Records shown under the current filter; "problems" uses this session's result, else the stored one.
+    private var shown: [ArchiveRecord] {
+        guard onlyProblems else { return records }
+        return records.filter { ArchiveHistorySummary.isProblem(checks[$0.id], last: $0.lastCheck) }
     }
 
     private func countChip(_ title: String, value: Int, tint: Color) -> some View {
@@ -176,6 +210,9 @@ struct ArchiveHistoryScreen: View {
             .help("Показать в Finder")
             .disabled(missing)
             Menu {
+                Button("Открыть отчёт") { actions.openReport(record.url.appendingPathComponent("import-report.json")) }
+                    .disabled(missing)
+                Divider()
                 Button("Убрать из списка", role: .destructive) { actions.remove(record.id) }
             } label: {
                 Image(systemName: "ellipsis.circle")

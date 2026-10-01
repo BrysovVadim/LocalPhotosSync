@@ -278,3 +278,15 @@ final class VerifyArchivesCommandTests: XCTestCase {
         XCTAssertEqual(LocalPhotosSyncCLI.verifyArchives(historyAt: history).exitCode, 2)
     }
 }
+
+final class ArchiveProblemFilterTests: XCTestCase {
+    func testProblemUsesSessionResultBeforeStoredOne() {
+        let now = Date()
+        XCTAssertTrue(ArchiveHistorySummary.isProblem(.missing(at: now), last: nil))
+        XCTAssertTrue(ArchiveHistorySummary.isProblem(.failed(details: "x", at: now), last: ArchiveLastCheck(at: now, outcome: .passed)))
+        XCTAssertFalse(ArchiveHistorySummary.isProblem(.passed(files: 1, at: now), last: ArchiveLastCheck(at: now, outcome: .missing)))
+        XCTAssertFalse(ArchiveHistorySummary.isProblem(.checking, last: ArchiveLastCheck(at: now, outcome: .failed)))
+        XCTAssertTrue(ArchiveHistorySummary.isProblem(nil, last: ArchiveLastCheck(at: now, outcome: .failed)))
+        XCTAssertFalse(ArchiveHistorySummary.isProblem(nil, last: nil))
+    }
+}

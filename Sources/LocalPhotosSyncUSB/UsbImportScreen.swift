@@ -86,6 +86,7 @@ struct UsbImportScreen: View {
     @State private var query = ""
     @State private var filter = UsbImportTypeFilter.all
     @State private var anchor: String?
+    @State private var showOnlySelected = false
     @AppStorage("usb.tileSize") private var tileSize = PhoneCatalogTileSize.standard
     @AppStorage("usb.oldestFirst") private var oldestFirst = false
 
@@ -95,8 +96,9 @@ struct UsbImportScreen: View {
     }
 
     var body: some View {
-        let visible = DisplayOrder.apply(UsbImportFiltering.visible(state.items, query: query, filter: filter),
-                                         oldestFirst: oldestFirst)
+        let filtered = DisplayOrder.apply(UsbImportFiltering.visible(state.items, query: query, filter: filter),
+                                          oldestFirst: oldestFirst)
+        let visible = showOnlySelected ? filtered.filter { state.selected.contains($0.id) } : filtered
         VStack(alignment: .leading, spacing: 0) {
             header
                 .padding(.horizontal, 20)
@@ -118,6 +120,9 @@ struct UsbImportScreen: View {
                 .background(.bar)
         }
         .frame(minWidth: 760, minHeight: 540)
+        .onChange(of: state.selected) { _, selection in
+            if selection.isEmpty { showOnlySelected = false }
+        }
     }
 
     // MARK: - Header
@@ -357,8 +362,12 @@ struct UsbImportScreen: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 if hasFiles {
-                    Text(selectionSummary)
-                        .font(.callout.weight(.medium).monospacedDigit())
+                    Toggle(isOn: $showOnlySelected) {
+                        Text(selectionSummary).font(.callout.weight(.medium).monospacedDigit())
+                    }
+                    .toggleStyle(.button)
+                    .disabled(state.selected.isEmpty && !showOnlySelected)
+                    .help(showOnlySelected ? "Показаны только выбранные файлы. Нажмите, чтобы вернуть все." : "Показать только выбранные файлы.")
                     Button("Снять выбор") { actions.setSelection([]); anchor = nil }
                         .disabled(state.selected.isEmpty || state.importing)
                 }

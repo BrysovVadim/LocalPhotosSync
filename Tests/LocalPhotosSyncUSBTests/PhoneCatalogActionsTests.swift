@@ -124,3 +124,25 @@ final class PhoneCatalogActionsTests: XCTestCase {
                           scope: .mediaLibrary, isHidden: hidden, visibilityState: 0)
     }
 }
+
+final class PhoneCatalogDiagnosticsTests: XCTestCase {
+    @MainActor
+    func testDiagnosticsContainCountsButNoFileNames() {
+        let assets = [
+            PhoneCatalogAsset(id: 1, filename: "SECRET_NAME.HEIC", createdAt: nil, mediaType: .photo,
+                              scope: .mediaLibrary, isHidden: false, visibilityState: 0),
+            PhoneCatalogAsset(id: 2, filename: "OTHER.MOV", createdAt: nil, mediaType: .video,
+                              scope: .otherRecords, isHidden: false, visibilityState: 0),
+        ]
+        let reader = PhoneCatalogReader(fixedSnapshot: PhoneCatalogSnapshot(
+            assets: assets, snapshotDate: Date(timeIntervalSince1970: 1_790_000_000),
+            sourceFolder: URL(fileURLWithPath: "/nonexistent/snapshot")))
+        let text = reader.diagnostics(thumbnailsLoaded: 3, autoLoadPreviews: true)
+        XCTAssertTrue(text.contains("Media library: photos=1 videos=0"), text)
+        XCTAssertTrue(text.contains("total=2"), text)
+        XCTAssertTrue(text.contains("Previews in memory: 3"), text)
+        XCTAssertFalse(text.contains("SECRET_NAME"))
+        XCTAssertFalse(text.contains("OTHER.MOV"))
+        XCTAssertFalse(text.contains("/nonexistent"), "Paths of the snapshot folder are not included")
+    }
+}

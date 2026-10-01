@@ -12,8 +12,8 @@ struct PhoneCatalogView: View {
     @State private var showOnlySelected = false
     @AppStorage("catalog.oldestFirst") private var oldestFirst = false
     @State private var previewIndex: Int?
-    @State private var category = PhoneCatalogCategory.mediaLibrary
-    @State private var type = PhoneCatalogTypeFilter.all
+    @AppStorage("catalog.category") private var category = PhoneCatalogCategory.mediaLibrary
+    @AppStorage("catalog.type") private var type = PhoneCatalogTypeFilter.all
     @State private var search = ""
     @State private var selected: Set<Int64>
     @State private var page = 0
@@ -123,6 +123,15 @@ struct PhoneCatalogView: View {
                 statChip(.mediaLibrary, counts: snapshot.counts(in: .mediaLibrary))
                 statChip(.allRecords, counts: snapshot.counts(in: .allRecords))
             }
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(reader.diagnostics(thumbnailsLoaded: thumbnails.images.count,
+                                                                  autoLoadPreviews: autoLoadPreviews), forType: .string)
+            } label: {
+                Image(systemName: "doc.on.clipboard")
+            }
+            .help("Скопировать диагностику каталога: версии, наличие AFC runtime, снимки, счётчики и последнюю ошибку. Имена файлов и идентификаторы телефона не включаются.")
+            .accessibilityLabel("Скопировать диагностику каталога")
             Button {
                 reader.refresh()
             } label: {

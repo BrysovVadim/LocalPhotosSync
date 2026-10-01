@@ -309,6 +309,49 @@ final class PhoneCatalogReader: ObservableObject {
         }
     }
 
+    /// Support text for the catalog tab: environment and counts only, no file names or device identifiers.
+    func diagnostics(thumbnailsLoaded: Int, autoLoadPreviews: Bool) -> String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        var lines = [
+            "LocalPhotosSync \(version) — каталог iPhone",
+            "macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
+            "Build directory found: \(buildDirectory != nil)",
+        ]
+        if let buildDirectory {
+            let fm = FileManager.default
+            let runtime = buildDirectory.appendingPathComponent("afc-runtime")
+            let repo = buildDirectory.deletingLastPathComponent()
+            let snapshots = (try? fm.contentsOfDirectory(atPath: buildDirectory.appendingPathComponent("phone-catalog-probe").path))?
+                .filter { !$0.hasPrefix(".") }.count ?? 0
+            lines += [
+                "AFC runtime folder: \(fm.fileExists(atPath: runtime.path))",
+                "AFC runtime libraries: \(Self.localLibraryPath(in: runtime).split(separator: ":").count) folders",
+                "python3: \(fm.isExecutableFile(atPath: "/usr/bin/python3"))",
+                "Probe runner: \(fm.fileExists(atPath: repo.appendingPathComponent("experiments/afc/run-probe.py").path))",
+                "Snapshot folders: \(snapshots)",
+            ]
+        }
+        if let snapshot {
+            let library = snapshot.counts(in: .mediaLibrary)
+            let all = snapshot.counts(in: .allRecords)
+            lines += [
+                "Snapshot captured: \(ISO8601DateFormatter().string(from: snapshot.snapshotDate))",
+                "Source binding present: \(FileManager.default.fileExists(atPath: snapshot.sourceFolder.appendingPathComponent("source-binding.bin").path))",
+                "Media library: photos=\(library.photos) videos=\(library.videos)",
+                "All records: photos=\(all.photos) videos=\(all.videos) total=\(snapshot.assets.count)",
+            ]
+        } else {
+            lines.append("Snapshot: none loaded")
+        }
+        lines += [
+            "Refreshing: \(isRefreshing), loading snapshot: \(isLoadingSnapshot)",
+            "Last error: \(errorMessage ?? "none")",
+            "Previews in memory: \(thumbnailsLoaded), automatic loading: \(autoLoadPreviews)",
+        ]
+        return lines.joined(separator: "\n")
+    }
+
     func refresh() {
         guard let buildDirectory else {
             errorMessage = "Не удалось найти каталог приложения для обновления."
