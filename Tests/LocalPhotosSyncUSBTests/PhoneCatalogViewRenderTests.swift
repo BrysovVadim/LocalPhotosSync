@@ -62,7 +62,7 @@ final class PhoneCatalogViewRenderTests: XCTestCase {
                 assets: assets, index: .constant(index),
                 image: { withImage ? UsbImportFixtures.thumbnail(for: "asset-\($0)") : nil },
                 isSelected: { $0 == assets[2].id },
-                availability: { withImage ? check : nil },
+                availability: { _ in withImage ? check : nil },
                 canLoadPreview: { _ in true }, isBusy: false, actions: CatalogPreviewActions())
             try ScreenRenderer.render(sheet, size: CGSize(width: 640, height: 600))
                 .write(to: output.appendingPathComponent("\(name).png"))
