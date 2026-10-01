@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python probes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Unit tests
+        run: |
+          for suite in Tests/EnvironmentDiagnostics Tests/AFCThumbnail Tests/AFCAssetCopy Tests/AFCLivePhoto; do
+            echo "::group::$suite"
+            python3 -m unittest discover -s "$suite"
+            echo "::endgroup::"
+          done
+
+  macos:
+    name: Swift build and tests
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+      - name: Build
+        run: swift build -Xswiftc -warnings-as-errors
+      - name: Tests
+        run: swift test
+      - name: App bundle and signature
+        run: zsh scripts/build-app.sh
