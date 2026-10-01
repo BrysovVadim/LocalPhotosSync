@@ -8,12 +8,7 @@ import XCTest
 @MainActor
 final class PhoneCatalogViewRenderTests: XCTestCase {
     func testRendersCatalogScreens() throws {
-        guard let path = ProcessInfo.processInfo.environment["LPS_RENDER_DIR"], !path.isEmpty else {
-            throw XCTSkip("Set LPS_RENDER_DIR to render catalog screens.")
-        }
-        let output = URL(fileURLWithPath: path, isDirectory: true)
-        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        _ = NSApplication.shared
+        let output = try ScreenRenderer.outputDirectory()
 
         let snapshot = Self.fixtureSnapshot()
         let ids = snapshot.assets(category: .mediaLibrary).map(\.id)
@@ -27,28 +22,10 @@ final class PhoneCatalogViewRenderTests: XCTestCase {
             let view = PhoneCatalogView(exporter: PhoneAssetExporter(),
                                         reader: PhoneCatalogReader(fixedSnapshot: snapshot),
                                         selected: item.selection)
-            let png = try render(view, size: item.size, appearance: item.appearance)
+            let png = try ScreenRenderer.render(view, size: item.size, appearance: item.appearance)
             XCTAssertGreaterThan(png.count, 10_000, item.name)
             try png.write(to: output.appendingPathComponent("\(item.name).png"))
         }
-    }
-
-    private func render<V: View>(_ view: V, size: CGSize, appearance: NSAppearance.Name) throws -> Data {
-        let hosting = NSHostingView(rootView: view
-            .frame(width: size.width, height: size.height)
-            .background(Color(nsColor: .windowBackgroundColor)))
-        hosting.frame = CGRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: hosting.frame, styleMask: [.titled], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.appearance = NSAppearance(named: appearance)
-        window.contentView = hosting
-        hosting.layoutSubtreeIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
-        hosting.layoutSubtreeIfNeeded()
-        let rep = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
-        hosting.cacheDisplay(in: hosting.bounds, to: rep)
-        window.contentView = nil
-        return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
     }
 
     private static func fixtureSnapshot() -> PhoneCatalogSnapshot {

@@ -20,211 +20,52 @@ struct LocalPhotosSyncApp: App {
     }
 }
 
+/// Adapts the live ImageCaptureCore store to the fixture-renderable USB import screen.
 private struct LibraryView: View {
     @ObservedObject var store: CameraStore
-    @State private var query = ""
-    @State private var filter = "Все"
-
-    private var visible: [MediaItem] {
-        store.items.filter {
-            (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) &&
-            (filter == "Все" || (filter == "Видео" ? $0.isVideo : !$0.isVideo))
-        }
-    }
-
-    private var selectedBytes: Int64 {
-        store.items.filter { store.selected.contains($0.id) }.reduce(0) { $0 + max(0, $1.bytes) }
-    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Фото с iPhone").font(.largeTitle.bold())
-                    Text("Первый перенос по USB · без установки на телефон").foregroundStyle(.secondary)
-                }
-                Spacer()
-                Picker("Устройство", selection: Binding(get: { store.connectedID }, set: { store.connect($0) })) {
-                    Text("Выберите iPhone").tag("")
-                    ForEach(store.devices, id: \.self) { device in
-                        Text(device.name ?? "Устройство").tag(store.deviceID(device))
-                    }
-                }
-                .frame(width: 250)
-                .disabled(store.importing)
-            }
-
-            Label(store.status, systemImage: store.ready ? "iphone.gen3" : "cable.connector")
-                .textSelection(.enabled)
-            HStack {
-                Text("Состояние: \(store.connectionState.label)").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("Скопировать диагностику") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(store.diagnostics(), forType: .string)
-                }
-            }
-            Text("Показаны файлы, доступные через USB. Снимки только в iCloud могут отсутствовать. Live Photo может отображаться отдельными фото и видео.")
-                .font(.callout).foregroundStyle(.secondary)
-
-            HStack {
-                Picker("Тип", selection: $filter) {
-                    Text("Все").tag("Все")
-                    Text("Фото и другие файлы").tag("Фото")
-                    Text("Видео").tag("Видео")
-                }.pickerStyle(.segmented).frame(width: 380)
-                TextField("Поиск по имени файла", text: $query).textFieldStyle(.roundedBorder)
-                Button("Подключиться снова") { store.reconnect() }
-                    .disabled(store.connectedID.isEmpty || store.importing)
-            }
-
-            HStack(spacing: 12) {
-                Button("Выбрать показанные (\(visible.count))") { store.selectVisible(visible.map(\.id)) }
-                    .disabled(!store.ready || visible.isEmpty || store.importing)
-                if store.importing { ProgressView().controlSize(.small) }
-                Text(store.importing ? "Перенесено: \(store.importedCount)" : "")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            if store.items.isEmpty {
-                Group {
-                    switch store.connectionState {
-                    case .waiting:
-                        ContentUnavailableView {
-                            Label("Подключите iPhone", systemImage: "iphone.and.arrow.forward")
-                        } description: {
-                            Text("Подключите кабель. Разблокируйте телефон и нажмите «Доверять» на iPhone, если появится запрос.")
-                        }
-                    case .unlock:
-                        ContentUnavailableView {
-                            Label("Разблокируйте iPhone", systemImage: "lock.open")
-                        } description: {
-                            Text("Оставьте iPhone разблокированным, пока Mac подключается к нему.")
-                        }
-                    case .catalog, .loading:
-                        VStack(spacing: 12) {
-                            ProgressView()
-                            Text("Получаем список файлов с iPhone…")
-                                .foregroundStyle(.secondary)
-                        }
-                    case .ready:
-                        ContentUnavailableView {
-                            Label("Доступных USB-файлов нет", systemImage: "photo.on.rectangle.angled")
-                        } description: {
-                            Text("Для этого iPhone через кабель сейчас не удалось получить доступные файлы.")
-                        }
-                    case .error:
-                        ContentUnavailableView {
-                            Label("Не удалось подключиться", systemImage: "exclamationmark.iphone")
-                        } description: {
-                            Text("Посмотрите сообщение об ошибке выше, проверьте кабель и доверие к Mac, затем нажмите «Подключиться снова».")
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if visible.isEmpty {
-                ContentUnavailableView {
-                    Label("Ничего не найдено", systemImage: "magnifyingglass")
-                } description: {
-                    Text("Очистите поиск или измените выбранный тип файлов.")
-                } actions: {
-                    Button("Сбросить поиск и тип") {
-                        query = ""
-                        filter = "Все"
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 12)], spacing: 12) {
-                        ForEach(visible) { item in
-                            MediaTile(item: item, selected: store.selected.contains(item.id), store: store, ready: store.ready) {
-                                if store.selected.contains(item.id) { store.selected.remove(item.id) }
-                                else { store.selected.insert(item.id) }
-                            }
-                        }
-                    }.padding(3)
-                }
-                .disabled(store.importing || !store.ready)
-            }
-
-            Divider()
-            HStack {
-                Text("Выбрано: \(store.selected.count) · \(ByteCountFormatter.string(fromByteCount: selectedBytes, countStyle: .file))")
-                Button("Снять выбор") { store.selected = [] }
-                    .disabled(store.selected.isEmpty || store.importing)
-                Spacer()
-                if let archive = store.lastArchive {
-                    Button("Открыть папку") { NSWorkspace.shared.open(archive) }
-                }
-                Button("Проверить папку архива…") { store.verifyArchiveFolder() }
-                    .disabled(store.verifyingArchive || store.importing)
-                if store.importing {
-                    Button("Отменить перенос") { store.cancelImport() }
-                }
-                Button("Сохранить выбранные…") { store.importSelected() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!store.ready || store.selected.isEmpty || store.importing)
-            }
-            Text("Для независимого архива выберите папку вне iCloud Drive.")
-                .font(.caption).foregroundStyle(.secondary)
-            if !store.results.isEmpty {
-                ScrollView { Text(store.results).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
-                    .frame(maxHeight: 70)
-            }
-            if !store.verificationResults.isEmpty {
-                ScrollView { Text(store.verificationResults).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
-                    .frame(maxHeight: 90)
-                Text("Проверка сверяет сохранённые файлы с локальным отчётом; полноту iPhone или iCloud медиатеки и Live Photo она не подтверждает.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Text("После переноса фото остаются на iPhone. Этот прототип не удаляет снимки и не управляет iCloud.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-        .padding(24)
+        UsbImportScreen(state: state, actions: actions)
     }
-}
 
-private struct MediaTile: View {
-    let item: MediaItem
-    let selected: Bool
-    let store: CameraStore
-    let ready: Bool
-    let toggle: () -> Void
-    @State private var thumbnail: NSImage?
+    private var state: UsbImportScreenState {
+        UsbImportScreenState(
+            devices: store.devices.map { UsbImportDevice(id: store.deviceID($0), name: $0.name ?? "Устройство") },
+            connectedID: store.connectedID,
+            connectionState: store.connectionState,
+            status: store.status,
+            ready: store.ready,
+            importing: store.importing,
+            importProcessed: store.importProcessed,
+            importTotal: store.importTotal,
+            importedCount: store.importedCount,
+            items: store.items.map { UsbImportItem(id: $0.id, name: $0.name, date: $0.date, bytes: $0.bytes, isVideo: $0.isVideo) },
+            selected: store.selected,
+            results: store.results,
+            lastImportSucceeded: store.lastImportSucceeded,
+            lastArchive: store.lastArchive,
+            verifyingArchive: store.verifyingArchive,
+            verificationResults: store.verificationResults,
+            lastVerificationPassed: store.lastVerificationPassed)
+    }
 
-    var body: some View {
-        Button(action: toggle) {
-            VStack(alignment: .leading, spacing: 6) {
-                ZStack(alignment: .topTrailing) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08))
-                        if let thumbnail {
-                            Image(nsImage: thumbnail).resizable().scaledToFit()
-                        } else {
-                            Image(systemName: item.isVideo ? "video" : "photo").font(.largeTitle).foregroundStyle(.secondary)
-                        }
-                    }.frame(height: 120).clipShape(RoundedRectangle(cornerRadius: 8))
-                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .font(.title2).symbolRenderingMode(.palette)
-                        .foregroundStyle(selected ? Color.accentColor : Color.secondary, .white)
-                        .padding(6)
-                }
-                Text(item.name).lineLimit(1).font(.callout)
-                HStack {
-                    if item.isVideo { Image(systemName: "video.fill") }
-                    Text(ByteCountFormatter.string(fromByteCount: item.bytes, countStyle: .file))
-                    Spacer()
-                }.font(.caption).foregroundStyle(.secondary)
-                if let date = item.date {
-                    Text(date, format: .dateTime.day().month().year()).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .padding(8)
-            .background(RoundedRectangle(cornerRadius: 12).fill(selected ? Color.accentColor.opacity(0.12) : Color.clear))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected ? Color.accentColor : Color.secondary.opacity(0.2)))
-        }
-        .buttonStyle(.plain)
-        .task(id: "\(item.id)-\(ready)") { thumbnail = await store.thumbnail(for: item) }
+    private var actions: UsbImportActions {
+        let store = store
+        return UsbImportActions(
+            connect: { store.connect($0) },
+            reconnect: { store.reconnect() },
+            copyDiagnostics: {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(store.diagnostics(), forType: .string)
+            },
+            setSelection: { selection in
+                guard !store.importing else { return }
+                store.selected = selection
+            },
+            importSelected: { store.importSelected() },
+            cancelImport: { store.cancelImport() },
+            verifyArchive: { store.verifyArchiveFolder() },
+            openArchive: { NSWorkspace.shared.open($0) },
+            thumbnail: { await store.thumbnail(forID: $0) })
     }
 }

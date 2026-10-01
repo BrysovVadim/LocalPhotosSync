@@ -76,8 +76,13 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
     @Published private(set) var results = ""
     @Published private(set) var lastArchive: URL?
     @Published private(set) var importedCount = 0
+    @Published private(set) var importProcessed = 0
+    @Published private(set) var importTotal = 0
+    /// Outcome of the last import in this session: nil before the first import and while one is running.
+    @Published private(set) var lastImportSucceeded: Bool?
     @Published private(set) var verifyingArchive = false
     @Published private(set) var verificationResults = ""
+    @Published private(set) var lastVerificationPassed: Bool?
     private(set) var deviceDiscoveryComplete = false
     private(set) var sessionOpenResult = "not_attempted"
 
@@ -167,6 +172,11 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         guard let data, let image = NSImage(data: data) else { return nil }
         thumbnails.setObject(image, forKey: item.id as NSString)
         return image
+    }
+
+    func thumbnail(forID id: String) async -> NSImage? {
+        guard let item = catalog[id] else { return nil }
+        return await thumbnail(for: item)
     }
 
     func selectVisible(_ ids: [String]) {
@@ -408,6 +418,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         panel.canCreateDirectories = false
         guard panel.runModal() == .OK, let directory = panel.url else { return }
         verifyingArchive = true
+        lastVerificationPassed = nil
         verificationResults = "Проверка файлов и контрольных сумм…"
         Task {
             let reportURL = directory.appendingPathComponent("import-report.json")
@@ -419,8 +430,10 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             case let .success(result):
                 let heading = result.isValid ? "Проверка пройдена." : "Проверка не пройдена или архив неполон."
                 verificationResults = "\(heading) Проверено файлов: \(result.verifiedFiles)." + (result.failures.isEmpty ? "" : "\n" + result.failures.joined(separator: "\n"))
+                lastVerificationPassed = result.isValid
             case let .failure(error):
                 verificationResults = "Не удалось проверить папку: \(error.localizedDescription)"
+                lastVerificationPassed = false
             }
             verifyingArchive = false
         }
@@ -432,6 +445,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         guard !batch.isEmpty else { return }
         let panel = NSOpenPanel()
         panel.title = "Куда сохранить выбранные файлы?"
+        panel.message = "Для независимого архива выберите папку вне iCloud Drive."
         panel.prompt = "Выбрать папку"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -449,10 +463,17 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         let stamp = ISO8601DateFormatter().string(from: startedAt).replacingOccurrences(of: ":", with: "-")
         let directory = parent.appendingPathComponent("LocalPhotosSync-\(stamp)-\(UUID().uuidString.prefix(8))", isDirectory: true)
         do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false) }
-        catch { results = "Не удалось создать папку: \(error.localizedDescription)"; return nil }
+        catch {
+            results = "Не удалось создать папку: \(error.localizedDescription)"
+            lastImportSucceeded = false
+            return nil
+        }
         importing = true
         cancelRequested = false
         importedCount = 0
+        importProcessed = 0
+        importTotal = batch.count
+        lastImportSucceeded = nil
         results = ""
         lastArchive = directory
 
@@ -464,6 +485,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
                 try ImportReport(startedAt: startedAt, files: receipts, errors: errors, expectedFileCount: batch.count, completed: false).write(to: directory)
             } catch {
                 results = "Не удалось записать начальный отчёт: \(error.localizedDescription)"
+                lastImportSucceeded = false
                 importing = false
                 return
             }
@@ -491,6 +513,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
                     if !(error is ImportCancelledError) { lastError = error as NSError }
                     errors.append("\(item.name): \(error.localizedDescription)")
                 }
+                importProcessed = index + 1
                 if cancelRequested {
                     errors.append("Импорт отменён пользователем после завершения текущей проверки. Архив неполон.")
                     do { try ImportReport(startedAt: startedAt, files: receipts, errors: errors, expectedFileCount: batch.count, completed: false).write(to: directory) }
@@ -525,6 +548,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             status = "Сохранено: \(receipts.count) из \(batch.count). Ошибок: \(errors.count)."
             let summary = finishedBatch && errors.isEmpty ? "Файлы и отчёт сохранены. Исходники на iPhone не изменены." : errors.joined(separator: "\n")
             results = summary
+            lastImportSucceeded = finishedBatch && errors.isEmpty
         }
         return directory
     }

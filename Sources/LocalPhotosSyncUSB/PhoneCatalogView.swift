@@ -344,13 +344,7 @@ struct PhoneCatalogView: View {
                 .help("Сохранить выбранные файлы в новую папку с отчётом проверки (⌘S).")
             }
             ForEach(statusLines(actions: actions)) { line in
-                Label {
-                    Text(line.text).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                } icon: {
-                    Image(systemName: line.symbol)
-                }
-                .font(.caption)
-                .foregroundStyle(line.tint)
+                StatusMessageRow(symbol: line.symbol, text: line.text, tone: line.tone)
             }
             Text("За раз: до \(PhoneCatalogActionState.selectionLimit) файлов, каждый до 32 МБ; Live Photo — одно фото с видео. Полнота оригиналов и данных правок пока не подтверждена.")
                 .font(.caption2).foregroundStyle(.tertiary)
@@ -365,35 +359,35 @@ struct PhoneCatalogView: View {
         let id: String
         let symbol: String
         let text: String
-        let tint: Color
+        let tone: StatusTone
     }
 
     private func statusLines(actions: PhoneCatalogActionState) -> [StatusLine] {
         var lines: [StatusLine] = []
         if let message = exporter.message {
-            var tint = Color.secondary
+            var tone = StatusTone.neutral
             var symbol = "info.circle"
             if exporter.isExporting {
                 symbol = "arrow.down.circle"
             } else if exporter.failedCount > 0 {
-                tint = Color.orange
+                tone = .warning
                 symbol = "exclamationmark.triangle"
             } else if exporter.exportedCount > 0 {
-                tint = Color.green
+                tone = .success
                 symbol = "checkmark.circle"
             }
-            lines.append(StatusLine(id: "export", symbol: symbol, text: message, tint: tint))
+            lines.append(StatusLine(id: "export", symbol: symbol, text: message, tone: tone))
         }
         if let message = exporter.availabilityMessage {
-            lines.append(StatusLine(id: "availability", symbol: "checklist", text: message, tint: .secondary))
+            lines.append(StatusLine(id: "availability", symbol: "checklist", text: message, tone: .neutral))
         }
         if let message = thumbnails.message {
             lines.append(StatusLine(id: "thumbnails", symbol: "photo",
-                                    text: message, tint: thumbnails.lastBatchFailed ? .orange : .secondary))
+                                    text: message, tone: thumbnails.lastBatchFailed ? .warning : .neutral))
         }
         if let hint = actions.hint {
             lines.append(StatusLine(id: "hint", symbol: "info.circle", text: hint,
-                                    tint: actions.selectedCount > PhoneCatalogActionState.selectionLimit ? .orange : .secondary))
+                                    tone: actions.selectedCount > PhoneCatalogActionState.selectionLimit ? .warning : .neutral))
         }
         return lines
     }
