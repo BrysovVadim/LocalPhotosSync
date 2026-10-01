@@ -175,6 +175,7 @@ int main(void) {
     }
     afc_dictionary_free(info);
     found = 1;
+    if (declared_bytes == 0) { status = "asset_empty"; goto cleanup; }
     if (declared_bytes > MAX_ASSET_SIZE) { status = "asset_size_out_of_bounds"; goto cleanup; }
     if (afc_file_open(afc, remote, AFC_FOPEN_RDONLY, &handle) != AFC_E_SUCCESS || !handle) {
         status = "asset_readonly_open_failed"; goto cleanup;
@@ -185,7 +186,7 @@ int main(void) {
     if (request > 0 && afc_file_read(afc, handle, (char *)header, request, &received) != AFC_E_SUCCESS) {
         status = "asset_header_read_failed"; goto cleanup;
     }
-    if (received > request) { status = "asset_header_read_failed"; goto cleanup; }
+    if (received != request) { status = "asset_header_read_failed"; goto cleanup; }
     bytes_read = received;
     format = classify_header(header, (size_t)received);
     status = "asset_header_read";

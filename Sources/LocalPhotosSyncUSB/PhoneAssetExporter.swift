@@ -18,6 +18,28 @@ enum PhoneLivePhotoProbeResult: Sendable {
     case cancelled
 }
 
+enum PhoneAssetAvailabilityProbeResult: Equatable, Sendable {
+    case mainFileReadable(bytes: Int64)
+    case mainFileMissing
+    case exceedsCopyLimit(bytes: Int64)
+    case failed
+    case timedOut
+    case cancelled
+}
+
+enum PhoneAssetAvailabilityState: Equatable, Sendable {
+    case mainFileReadable(bytes: Int64)
+    case mainFileMissing
+    case exceedsCopyLimit(bytes: Int64)
+    case failed
+}
+
+struct PhoneAssetAvailabilityCheck: Equatable, Sendable {
+    let state: PhoneAssetAvailabilityState
+    let sourceFolder: URL
+    let checkedAt: Date
+}
+
 final class PhoneAssetExportCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
@@ -76,6 +98,7 @@ private enum PhoneProbeProcessResult {
 final class PhoneAssetExporter: ObservableObject {
     typealias ProbeRunner = @Sendable (Int64, URL, TimeInterval, PhoneAssetExportCancellation) -> PhoneAssetCopyProbeResult
     typealias LivePhotoProbeRunner = @Sendable (Int64, URL, TimeInterval, PhoneAssetExportCancellation) -> PhoneLivePhotoProbeResult
+    typealias AvailabilityProbeRunner = @Sendable (Int64, URL, TimeInterval, PhoneAssetExportCancellation) -> PhoneAssetAvailabilityProbeResult
 
     nonisolated static let processGroupLauncherSource = """
     import os,sys,signal
@@ -108,22 +131,73 @@ final class PhoneAssetExporter: ObservableObject {
     @Published private(set) var savedAssetIDs: Set<Int64> = []
     @Published private(set) var failedAssetIDs: Set<Int64> = []
     @Published private(set) var sourceFolder: URL?
+    @Published private(set) var availabilityResults: [Int64: PhoneAssetAvailabilityCheck] = [:]
+    @Published private(set) var availabilitySourceFolder: URL?
+    @Published private(set) var availabilityMessage: String?
 
     private let probeRunner: ProbeRunner
     private let livePhotoProbeRunner: LivePhotoProbeRunner
+    private let availabilityProbeRunner: AvailabilityProbeRunner
     private var activeCancellation: PhoneAssetExportCancellation?
 
     init(probeRunner: @escaping ProbeRunner = { assetID, snapshotFolder, timeout, cancellation in
         PhoneAssetExporter.runProbe(assetID, snapshotFolder, timeout, cancellation)
     }, livePhotoProbeRunner: @escaping LivePhotoProbeRunner = { assetID, snapshotFolder, timeout, cancellation in
         PhoneAssetExporter.runLivePhotoProbe(assetID, snapshotFolder, timeout, cancellation)
+    }, availabilityProbeRunner: @escaping AvailabilityProbeRunner = { assetID, snapshotFolder, timeout, cancellation in
+        PhoneAssetExporter.runAvailabilityProbe(assetID, snapshotFolder, timeout, cancellation)
     }) {
         self.probeRunner = probeRunner
         self.livePhotoProbeRunner = livePhotoProbeRunner
+        self.availabilityProbeRunner = availabilityProbeRunner
     }
 
     func cancel() {
         activeCancellation?.cancel()
+    }
+
+    func checkAvailability(assets: [PhoneCatalogAsset], snapshot: PhoneCatalogSnapshot) {
+        guard !isExporting else { return }
+        let sameSnapshot = availabilitySourceFolder?.resolvingSymlinksInPath().standardizedFileURL ==
+            snapshot.sourceFolder.resolvingSymlinksInPath().standardizedFileURL
+        if !sameSnapshot { availabilityResults = [:] }
+        let selectedIDs = Set(assets.map(\.id))
+        availabilityResults = availabilityResults.filter { !selectedIDs.contains($0.key) }
+        availabilitySourceFolder = snapshot.sourceFolder
+        guard !assets.isEmpty, assets.count <= 12,
+              Set(assets.map(\.id)).count == assets.count,
+              assets.allSatisfy({ $0.id > 0 && $0.isVisibleLibraryItem &&
+                  ($0.mediaType == .photo || $0.mediaType == .video) && Self.safeFilename($0.filename) }) else {
+            availabilityMessage = "Выберите от 1 до 12 видимых фото или видео из медиатеки."
+            return
+        }
+        isExporting = true
+        availabilityMessage = "Проверяем доступность файлов…"
+        let cancellation = PhoneAssetExportCancellation()
+        activeCancellation = cancellation
+        let runner = availabilityProbeRunner
+        Task { [self] in
+            let checks = await withTaskCancellationHandler {
+                await Task.detached(priority: .userInitiated) {
+                    Self.performAvailabilityCheck(assets: assets, snapshotFolder: snapshot.sourceFolder,
+                                                  runner: runner, cancellation: cancellation)
+                }.value
+            } onCancel: {
+                cancellation.cancel()
+            }
+            for (assetID, check) in checks { availabilityResults[assetID] = check }
+            if cancellation.isCancelled {
+                availabilityMessage = "Проверка доступности отменена; непроверенные записи остались без результата."
+            } else if checks.values.contains(where: { $0.state == .failed }) {
+                availabilityMessage = "Не все файлы удалось проверить; это не означает, что они находятся в iCloud."
+            } else if checks.count < assets.count {
+                availabilityMessage = "Общий лимит времени проверки истёк; непроверенные записи остались без результата."
+            } else {
+                availabilityMessage = "Проверка доступности завершена. Она проверяет только чтение заголовка файла."
+            }
+            activeCancellation = nil
+            isExporting = false
+        }
     }
 
     func export(assets: [PhoneCatalogAsset], snapshot: PhoneCatalogSnapshot, destination: URL) {
@@ -661,6 +735,70 @@ final class PhoneAssetExporter: ObservableObject {
         }
     }
 
+    nonisolated static func performAvailabilityCheck(
+        assets: [PhoneCatalogAsset], snapshotFolder: URL,
+        runner: @escaping AvailabilityProbeRunner, cancellation: PhoneAssetExportCancellation
+    ) -> [Int64: PhoneAssetAvailabilityCheck] {
+        let deadline = ProcessInfo.processInfo.systemUptime + 120
+        var checks: [Int64: PhoneAssetAvailabilityCheck] = [:]
+        for asset in assets {
+            if cancellation.isCancelled { break }
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            if remaining <= 0 { break }
+            let result = runner(asset.id, snapshotFolder, min(30, remaining), cancellation)
+            if cancellation.isCancelled { break }
+            if case .cancelled = result { break }
+            let state: PhoneAssetAvailabilityState
+            switch result {
+            case .mainFileReadable(let bytes): state = .mainFileReadable(bytes: bytes)
+            case .mainFileMissing: state = .mainFileMissing
+            case .exceedsCopyLimit(let bytes): state = .exceedsCopyLimit(bytes: bytes)
+            case .failed, .timedOut: state = .failed
+            case .cancelled: continue
+            }
+            checks[asset.id] = PhoneAssetAvailabilityCheck(state: state, sourceFolder: snapshotFolder, checkedAt: Date())
+        }
+        return checks
+    }
+
+    nonisolated static func runAvailabilityProbe(
+        _ assetID: Int64, _ snapshotFolder: URL, _ timeout: TimeInterval,
+        _ cancellation: PhoneAssetExportCancellation, scriptURL overrideScriptURL: URL? = nil
+    ) -> PhoneAssetAvailabilityProbeResult {
+        guard !cancellation.isCancelled, assetID > 0, timeout.isFinite, timeout > 0, timeout <= 30,
+              let repository = repositoryRoot(for: snapshotFolder) else { return .failed }
+        let script = overrideScriptURL ?? repository.appendingPathComponent("experiments/afc/run-asset-header-probe.py")
+        let execution = runPythonProbe(script, arguments: ["--snapshot", snapshotFolder.path, "--asset-id", String(assetID)],
+                                       repository: repository, timeout: timeout, cancellation: cancellation)
+        let data: Data
+        let exitCode: Int32
+        switch execution {
+        case .completed(let output, let code): data = output; exitCode = code
+        case .failed: return .failed
+        case .timedOut: return .timedOut
+        case .cancelled: return .cancelled
+        }
+        let keys: Set<String> = ["source", "status", "found", "declaredBytes", "bytesRead", "format"]
+        guard data.count <= 16 * 1024,
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(value.keys) == keys, value["source"] as? String == "iphone_afc",
+              let status = value["status"] as? String,
+              status.range(of: "^[a-z0-9_]{1,64}$", options: .regularExpression) != nil,
+              let found = strictAvailabilityInteger(value["found"]),
+              let declared = strictAvailabilityInteger(value["declaredBytes"]),
+              let bytesRead = strictAvailabilityInteger(value["bytesRead"]),
+              let format = value["format"] as? String, ["jpeg", "png", "isobmff", "unknown"].contains(format),
+              found == 0 || found == 1, declared >= 0, bytesRead >= 0, bytesRead <= 16 else { return .failed }
+
+        if status == "asset_unavailable", exitCode == 1, found == 0, declared == 0,
+           bytesRead == 0, format == "unknown" { return .mainFileMissing }
+        guard status == "asset_header_read", exitCode == 0, found == 1,
+              declared > 0, declared <= 1024 * 1024 * 1024,
+              bytesRead == min(16, declared) else { return .failed }
+        if declared > 32 * 1024 * 1024 { return .exceedsCopyLimit(bytes: declared) }
+        return .mainFileReadable(bytes: declared)
+    }
+
     nonisolated static func runProbe(_ assetID: Int64, _ snapshotFolder: URL, _ timeout: TimeInterval,
                                      _ cancellation: PhoneAssetExportCancellation,
                                      scriptURL overrideScriptURL: URL? = nil) -> PhoneAssetCopyProbeResult {
@@ -943,6 +1081,12 @@ final class PhoneAssetExporter: ObservableObject {
     nonisolated private static func integer(_ value: Any?) -> Int64? {
         guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
         return number.int64Value
+    }
+
+    nonisolated private static func strictAvailabilityInteger(_ value: Any?) -> Int64? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              let parsed = Int64(number.stringValue), String(parsed) == number.stringValue else { return nil }
+        return parsed
     }
 
     nonisolated private static func safeFilename(_ value: String) -> Bool {

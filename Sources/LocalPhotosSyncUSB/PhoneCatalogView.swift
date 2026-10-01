@@ -107,7 +107,7 @@ struct PhoneCatalogView: View {
                     Button {
                         chooseExportFolder(for: snapshot)
                     } label: {
-                        Label(exporter.isExporting ? "Сохраняем…" : "Сохранить выбранные файлы…", systemImage: "square.and.arrow.down")
+                        Label("Сохранить выбранные файлы…", systemImage: "square.and.arrow.down")
                     }
                     .disabled(selectedAssets.isEmpty || selectedAssets.count > 12 || exporter.isExporting || thumbnails.isLoading || reader.isRefreshing || reader.isLoadingSnapshot)
                     Button("Сохранить Live Photo…") {
@@ -125,6 +125,20 @@ struct PhoneCatalogView: View {
                 }
                 Text("Файлы: до 12, каждый до 32 МБ. Live Photo: один снимок вместе с его видео.")
                     .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button {
+                        exporter.checkAvailability(assets: selectedAssets, snapshot: snapshot)
+                    } label: {
+                        Label("Проверить файлы", systemImage: "magnifyingglass")
+                    }
+                    .disabled(selectedAssets.isEmpty || selectedAssets.count > 12 || exporter.isExporting || thumbnails.isLoading || reader.isRefreshing || reader.isLoadingSnapshot)
+                    Text("До 12 карточек. Для Live Photo проверяется фото; видео проверяется при переносе пары.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                if let message = exporter.availabilityMessage {
+                    Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
                 if let message = exporter.message {
                     Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 }
@@ -202,6 +216,11 @@ struct PhoneCatalogView: View {
                 Text(asset.filename.isEmpty ? "Имя файла не указано" : asset.filename)
                     .font(.callout).lineLimit(1)
                 Text(rowDetails(for: asset)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if exporter.availabilitySourceFolder == reader.snapshot?.sourceFolder,
+                   let check = exporter.availabilityResults[asset.id],
+                   check.sourceFolder == reader.snapshot?.sourceFolder {
+                    availabilityLabel(for: check)
+                }
                 if exporter.sourceFolder == reader.snapshot?.sourceFolder {
                     if exporter.savedAssetIDs.contains(asset.id) {
                         Label("Файл сохранён", systemImage: "checkmark.circle")
@@ -225,6 +244,29 @@ struct PhoneCatalogView: View {
         .disabled(exporter.isExporting || !asset.isVisibleLibraryItem || (asset.mediaType != .photo && asset.mediaType != .video))
         .accessibilityLabel("\(asset.filename), \(rowDetails(for: asset))")
         .accessibilityValue(selected.contains(asset.id) ? "Выбрано" : "Не выбрано")
+    }
+
+    private func availabilityLabel(for check: PhoneAssetAvailabilityCheck) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            switch check.state {
+            case .mainFileReadable(let bytes):
+                Label("Есть на iPhone · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))", systemImage: "iphone")
+                    .foregroundStyle(.green)
+            case .mainFileMissing:
+                Label("Файл не найден", systemImage: "questionmark.folder")
+                    .foregroundStyle(.secondary)
+            case .exceedsCopyLimit(let bytes):
+                Label("\(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) · больше лимита переноса", systemImage: "exclamationmark.circle")
+                    .foregroundStyle(.orange)
+            case .failed:
+                Label("Ошибка проверки", systemImage: "exclamationmark.circle")
+                    .foregroundStyle(.orange)
+            }
+            Text("Проверено \(check.checkedAt.formatted(date: .abbreviated, time: .shortened))")
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption2).lineLimit(2)
+        .help("Результат последней проверки наличия основного файла. Он может измениться; целостность и пара Live Photo проверяются при переносе. Если файл не найден, можно попробовать открыть снимок на iPhone, дождаться загрузки и повторить проверку.")
     }
 
     private var categoryNote: String {

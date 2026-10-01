@@ -120,6 +120,16 @@ def safe_result(raw):
         return None
     if value["format"] not in {"jpeg", "png", "isobmff", "unknown"}:
         return None
+    if value["status"] == "asset_header_read" and not (
+        value["found"] == 1 and 0 < value["declaredBytes"] <= 1024 * 1024 * 1024 and
+        value["bytesRead"] == min(16, value["declaredBytes"])
+    ):
+        return None
+    if value["status"] == "asset_unavailable" and not (
+        value["found"] == 0 and value["declaredBytes"] == 0 and value["bytesRead"] == 0 and
+        value["format"] == "unknown"
+    ):
+        return None
     return value
 
 
@@ -178,6 +188,11 @@ def main(argv=None):
     data = safe_result(child_output)
     if data is None:
         emit("probe_output_invalid")
+        return 1
+    if (data["status"] == "asset_header_read" and result.returncode != 0) or (
+        data["status"] == "asset_unavailable" and result.returncode != 1
+    ):
+        emit("probe_process_failed")
         return 1
     print(json.dumps(data, separators=(",", ":")))
     return 0 if result.returncode == 0 else 1

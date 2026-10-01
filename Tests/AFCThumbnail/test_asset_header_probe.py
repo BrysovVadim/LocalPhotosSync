@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+import subprocess
 
 
 RUNNER = Path(__file__).resolve().parents[2] / "experiments" / "afc" / "run-asset-header-probe.py"
@@ -45,6 +47,37 @@ class AssetHeaderProbeInputTests(unittest.TestCase):
                 invalid = dict(valid)
                 invalid.update(changes)
                 self.assertIsNone(probe.safe_result(json.dumps(invalid)))
+
+    def test_incomplete_header_cannot_be_reported_as_readable(self):
+        value = {"source": "iphone_afc", "status": "asset_header_read", "found": 1,
+                 "declaredBytes": 1024, "bytesRead": 15, "format": "jpeg"}
+        self.assertIsNone(probe.safe_result(json.dumps(value)))
+
+    def test_empty_file_cannot_be_reported_as_readable(self):
+        value = {"source": "iphone_afc", "status": "asset_header_read", "found": 1,
+                 "declaredBytes": 0, "bytesRead": 0, "format": "unknown"}
+        self.assertIsNone(probe.safe_result(json.dumps(value)))
+
+    def test_missing_file_requires_zero_result_fields(self):
+        value = {"source": "iphone_afc", "status": "asset_unavailable", "found": 0,
+                 "declaredBytes": 0, "bytesRead": 0, "format": "unknown"}
+        self.assertEqual(probe.safe_result(json.dumps(value)), value)
+        value["found"] = 1
+        self.assertIsNone(probe.safe_result(json.dumps(value)))
+
+    def test_success_json_with_failed_child_exit_cannot_report_readable(self):
+        value = {"source": "iphone_afc", "status": "asset_header_read", "found": 1,
+                 "declaredBytes": 1024, "bytesRead": 16, "format": "jpeg"}
+        result = subprocess.CompletedProcess(["fixture"], 1, json.dumps(value).encode())
+        with patch.object(probe.CATALOG, "verified_snapshot", return_value=(Path("fixture"), b"")), \
+             patch.object(probe.CATALOG, "select_one_candidate", return_value=("DCIM/100APPLE", "sample.JPG")), \
+             patch.object(probe, "read_binding", return_value=bytes(72)), \
+             patch.object(probe, "compile_probe", return_value=Path("fixture")), \
+             patch.object(probe.subprocess, "run", return_value=result), \
+             patch.object(probe, "emit") as emit:
+            exit_code = probe.main(["--snapshot", "fixture", "--asset-id", "1"])
+        self.assertEqual(exit_code, 1)
+        emit.assert_called_once_with("probe_process_failed")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,158 @@ final class PhoneAssetExporterTests: XCTestCase {
         case fail(String)
     }
 
+    private final class AvailabilitySequence: @unchecked Sendable {
+        private let lock = NSLock()
+        private var results: [PhoneAssetAvailabilityProbeResult]
+        init(_ results: [PhoneAssetAvailabilityProbeResult]) { self.results = results }
+        func next() -> PhoneAssetAvailabilityProbeResult {
+            lock.lock()
+            defer { lock.unlock() }
+            return results.isEmpty ? .failed : results.removeFirst()
+        }
+    }
+
+    @MainActor
+    func testAvailabilityReadableHeaderIsAssociatedWithSnapshot() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let asset = makeAsset(id: 31, filename: "photo.heic", type: .photo)
+        let exporter = PhoneAssetExporter(availabilityProbeRunner: { _, folder, _, _ in
+            .mainFileReadable(bytes: 219_786)
+        })
+
+        exporter.checkAvailability(assets: [asset], snapshot: fixture.snapshot)
+        await waitForAvailability(exporter)
+
+        let result = try XCTUnwrap(exporter.availabilityResults[31])
+        XCTAssertEqual(result.state, .mainFileReadable(bytes: 219_786))
+        XCTAssertEqual(result.sourceFolder, fixture.snapshot.sourceFolder)
+        XCTAssertLessThan(Date().timeIntervalSince(result.checkedAt), 10)
+        XCTAssertEqual(exporter.availabilitySourceFolder, fixture.snapshot.sourceFolder)
+        XCTAssertNil(exporter.sourceFolder)
+        XCTAssertTrue(exporter.savedAssetIDs.isEmpty)
+    }
+
+    @MainActor
+    func testAvailabilityMissingFileHasDistinctState() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let asset = makeAsset(id: 32, filename: "missing.heic", type: .photo)
+        let exporter = PhoneAssetExporter(availabilityProbeRunner: { _, _, _, _ in .mainFileMissing })
+
+        exporter.checkAvailability(assets: [asset], snapshot: fixture.snapshot)
+        await waitForAvailability(exporter)
+
+        XCTAssertEqual(exporter.availabilityResults[32]?.state, .mainFileMissing)
+        XCTAssertFalse(exporter.availabilityMessage?.contains("iCloud") ?? false)
+    }
+
+    @MainActor
+    func testAvailabilityOverCopyLimitIsNotReadableForExport() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let asset = makeAsset(id: 33, filename: "large.mov", type: .video)
+        let exporter = PhoneAssetExporter(availabilityProbeRunner: { _, _, _, _ in
+            .exceedsCopyLimit(bytes: 32 * 1024 * 1024 + 1)
+        })
+
+        exporter.checkAvailability(assets: [asset], snapshot: fixture.snapshot)
+        await waitForAvailability(exporter)
+
+        XCTAssertEqual(exporter.availabilityResults[33]?.state, .exceedsCopyLimit(bytes: 32 * 1024 * 1024 + 1))
+        XCTAssertTrue(exporter.savedAssetIDs.isEmpty)
+    }
+
+    @MainActor
+    func testAvailabilityDisconnectFailureDoesNotBecomeMissing() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let asset = makeAsset(id: 34, filename: "offline.heic", type: .photo)
+        let exporter = PhoneAssetExporter(availabilityProbeRunner: { _, _, _, _ in .failed })
+
+        exporter.checkAvailability(assets: [asset], snapshot: fixture.snapshot)
+        await waitForAvailability(exporter)
+
+        XCTAssertEqual(exporter.availabilityResults[34]?.state, .failed)
+        XCTAssertNotEqual(exporter.availabilityResults[34]?.state, .mainFileMissing)
+    }
+
+    @MainActor
+    func testAvailabilityRecheckClearsSelectedOldResultButKeepsOtherSameSnapshotResults() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let selected = makeAsset(id: 35, filename: "selected.heic", type: .photo)
+        let other = makeAsset(id: 36, filename: "other.heic", type: .photo)
+        let sequence = AvailabilitySequence([.mainFileReadable(bytes: 100), .mainFileMissing, .failed])
+        let exporter = PhoneAssetExporter(availabilityProbeRunner: { _, _, _, _ in sequence.next() })
+
+        exporter.checkAvailability(assets: [selected, other], snapshot: fixture.snapshot)
+        await waitForAvailability(exporter)
+        XCTAssertEqual(exporter.availabilityResults[35]?.state, .mainFileReadable(bytes: 100))
+        XCTAssertEqual(exporter.availabilityResults[36]?.state, .mainFileMissing)
+
+        exporter.checkAvailability(assets: [selected], snapshot: fixture.snapshot)
+        await waitForAvailability(exporter)
+
+        XCTAssertEqual(exporter.availabilityResults[35]?.state, .failed)
+        XCTAssertEqual(exporter.availabilityResults[36]?.state, .mainFileMissing)
+    }
+
+    @MainActor
+    func testAvailabilityCancellationRetainsCheckedResultsAndLeavesRemainingUnchecked() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let first = makeAsset(id: 37, filename: "first.heic", type: .photo)
+        let second = makeAsset(id: 38, filename: "second.heic", type: .photo)
+        let exporter = PhoneAssetExporter(availabilityProbeRunner: { assetID, _, _, cancellation in
+            if assetID == 37 { return .mainFileReadable(bytes: 16) }
+            while !cancellation.isCancelled { Thread.sleep(forTimeInterval: 0.005) }
+            return .cancelled
+        })
+
+        exporter.checkAvailability(assets: [first, second], snapshot: fixture.snapshot)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        exporter.cancel()
+        await waitForAvailability(exporter)
+
+        XCTAssertEqual(exporter.availabilityResults[37]?.state, .mainFileReadable(bytes: 16))
+        XCTAssertNil(exporter.availabilityResults[38])
+        XCTAssertTrue(exporter.availabilityMessage?.contains("отменена") ?? false)
+    }
+
+    func testAvailabilityParserRejectsReadableStatusWithNonzeroExit() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let script = try makeProbeScript("import sys\nprint('{\\\"source\\\":\\\"iphone_afc\\\",\\\"status\\\":\\\"asset_header_read\\\",\\\"found\\\":1,\\\"declaredBytes\\\":10,\\\"bytesRead\\\":10,\\\"format\\\":\\\"jpeg\\\"}')\nsys.exit(1)\n")
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        let result = await runAvailabilityProbe(snapshot: fixture.snapshot.sourceFolder, script: script)
+
+        XCTAssertEqual(result, .failed)
+    }
+
+    func testAvailabilityParserRejectsMalformedJSON() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let script = try makeProbeScript("print('not json')\n")
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        let result = await runAvailabilityProbe(snapshot: fixture.snapshot.sourceFolder, script: script)
+
+        XCTAssertEqual(result, .failed)
+    }
+
+    func testAvailabilityParserAcceptsOnlyExactNotFoundStatusForMissing() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let script = try makeProbeScript("import sys\nprint('{\\\"source\\\":\\\"iphone_afc\\\",\\\"status\\\":\\\"asset_unavailable\\\",\\\"found\\\":0,\\\"declaredBytes\\\":0,\\\"bytesRead\\\":0,\\\"format\\\":\\\"unknown\\\"}')\nsys.exit(1)\n")
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        let result = await runAvailabilityProbe(snapshot: fixture.snapshot.sourceFolder, script: script)
+
+        XCTAssertEqual(result, .mainFileMissing)
+    }
+
     @MainActor
     func testSuccessfulCopyProducesVerifiedArchiveAndRetainsFilenameExtension() async throws {
         let fixture = try makeFixture()
@@ -477,5 +629,19 @@ final class PhoneAssetExporterTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertFalse(exporter.isExporting, "Exporter did not finish its local fixture run")
+    }
+
+    @MainActor
+    private func waitForAvailability(_ exporter: PhoneAssetExporter) async {
+        for _ in 0..<500 where exporter.isExporting {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertFalse(exporter.isExporting, "Availability check did not finish its local fixture run")
+    }
+
+    private func runAvailabilityProbe(snapshot: URL, script: URL) async -> PhoneAssetAvailabilityProbeResult {
+        await Task.detached {
+            PhoneAssetExporter.runAvailabilityProbe(41, snapshot, 5, PhoneAssetExportCancellation(), scriptURL: script)
+        }.value
     }
 }
