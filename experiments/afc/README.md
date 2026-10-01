@@ -69,3 +69,30 @@ python3 -m unittest discover -s Tests/AFCAssetCopy -v
 Один доступный основной файл до 32 МиБ, поток 64 КиБ, дедлайн helper 60 секунд. Источник — только тот USB-iPhone, к которому привязан снимок; автоматической пары, записи и удаления на телефоне нет. Новая приватная папка содержит `media.bin` и отчёты с правами `0600`, без перезаписи. SHA-256 потока рассчитана на Mac; вызывающий код должен независимо перечитать сохранённый файл и сравнить digest. `stableObserved=false` нельзя считать стабильным результатом.
 
 На реальном телефоне PNG 219 786 байт и видео 17 889 288 байт скопированы и независимо проверены. Проверка доступного файла не подтверждает полноту оригинала или Live Photo. Временные результаты — в `.build/phone-asset-copy-probe/`.
+
+## Проверка скопированной пары Live Photo
+
+Standalone verifier читает два локальных файла и их private copy receipts. Он проверяет размер и SHA-256 каждого файла, декодирование изображения, content identifiers, видеоконтейнер и загрузку пары через `PHLivePhoto` с явными file URLs. Медиатека Mac не используется, данных телефона verifier не читает и не меняет. Это проверка одной пары, не разрешение на удаление.
+
+```sh
+swiftc -swift-version 5 Sources/LocalPhotosSyncUSB/ArchiveReceipt.swift experiments/afc/verify-live-photo.swift -framework AppKit -framework AVFoundation -framework ImageIO -framework Photos -o .build/verify-phone-live-photo
+```
+
+На входе — приватный JSON с правами `0600` и полями `imageFile`, `movieFile`, `imageFolder`, `movieFolder`, `proofFolder`. Изображение и MOV до 32 МиБ с правами `0600`, директории приватные, внутри каждой source-папки — `copy-receipt.json` от helper. Реальные fixture inputs и медиа остаются в `.build` и не входят в Git.
+
+Для всего процесса нужен внешний таймаут: встроенные десять секунд ограничивают callback `PHLivePhoto`, а не все операции AVFoundation и файловой системы. Пример для существующего приватного fixture:
+
+```sh
+python3 - <<'PY'
+import subprocess, sys
+try:
+    result = subprocess.run(['.build/verify-phone-live-photo', '.build/latest-live-photo-proof-inputs.json'], capture_output=True, text=True, timeout=30)
+except subprocess.TimeoutExpired:
+    print('{"verified":false,"status":"verifier_timeout"}')
+    sys.exit(1)
+print(result.stdout.strip())
+sys.exit(result.returncode)
+PY
+```
+
+Выход — только агрегаты; `verified=true` и код 0 означают проверенную пару, отказ — код 1. Реальная связанная пара прошла проверку. Отрицательный fixture с читаемым обычным видео получил `movie_identifier_missing`: видео проигрываемо и хеши совпадают, но идентификатора пары в нём нет.
