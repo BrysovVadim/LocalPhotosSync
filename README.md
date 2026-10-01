@@ -234,6 +234,7 @@ done
 - [План и история итераций](docs/roadmap.md)
 - [Полная медиатека: проблема и варианты](docs/problem-and-options.md)
 - [Протокол проверок на устройстве](docs/device-test-results.md)
+- [Список ручной проверки на iPhone для версий 0.6–0.21](docs/manual-test-checklist.md)
 - [Неполный каталог и недостающие файлы](docs/missing-media.md)
 - [Оригиналы на телефоне](docs/phone-originals.md)
 - [Wi-Fi-проба](docs/wifi-probe.md)
