@@ -263,15 +263,27 @@ final class ArchiveHistoryStore: ObservableObject {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let folder = panel.url else { return }
-        guard FileManager.default.fileExists(atPath: folder.appendingPathComponent("import-report.json").path) else {
-            message = "В папке «\(folder.lastPathComponent)» нет import-report.json; это не папка переноса."
-            return
+        add([folder])
+    }
+
+    /// Adds transfer folders (from the picker or dropped from Finder) and checks the new ones.
+    /// Folders without `import-report.json` are skipped with a message.
+    @discardableResult
+    func add(_ folders: [URL]) -> Int {
+        var added: [UUID] = []
+        var rejected: [String] = []
+        for folder in folders {
+            guard FileManager.default.fileExists(atPath: folder.appendingPathComponent("import-report.json").path) else {
+                rejected.append(folder.lastPathComponent)
+                continue
+            }
+            record(folder, source: .added)
+            if let id = records.first(where: { ArchiveHistoryFile.samePath($0.url, folder) })?.id { added.append(id) }
         }
-        message = nil
-        record(folder, source: .added)
-        if let id = records.first(where: { ArchiveHistoryFile.samePath($0.url, folder) })?.id {
-            verify([id])
-        }
+        message = rejected.isEmpty ? nil :
+            "Не добавлено, нет import-report.json: \(rejected.joined(separator: ", ")). Это не папки переноса."
+        if !added.isEmpty { verify(added) }
+        return added.count
     }
 
     func verifyAll() { verify(records.map(\.id)) }

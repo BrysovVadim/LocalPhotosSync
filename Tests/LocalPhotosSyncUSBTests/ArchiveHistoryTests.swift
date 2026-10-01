@@ -334,3 +334,37 @@ final class SettingsRenderTests: XCTestCase {
             .write(to: output.appendingPathComponent("settings.png"))
     }
 }
+
+final class ArchiveAddAndTotalsTests: XCTestCase {
+    @MainActor
+    func testAddSkipsFoldersWithoutReport() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let archive = root.appendingPathComponent("archive", isDirectory: true)
+        let other = root.appendingPathComponent("photos", isDirectory: true)
+        try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try ImportReport(startedAt: Date(), files: [], errors: [], expectedFileCount: 0, completed: true).write(to: archive)
+
+        let store = ArchiveHistoryStore(fileURL: nil)
+        XCTAssertEqual(store.add([archive, other]), 1)
+        XCTAssertEqual(store.records.map(\.name), ["archive"])
+        XCTAssertTrue(store.message?.contains("photos") == true)
+        XCTAssertEqual(store.add([archive]), 1, "Adding again keeps one entry")
+        XCTAssertEqual(store.records.count, 1)
+        XCTAssertNil(store.message)
+    }
+
+    @MainActor
+    func testTotalsLine() {
+        let records = (0..<3).map { ArchiveRecord(id: UUID(), path: "/a/\($0)", recordedAt: Date(), source: .catalog) }
+        XCTAssertFalse(ArchiveHistoryScreen.totalsLine(records: records, summaries: [:]).contains("Всего файлов"))
+        let summaries = [
+            records[0].id: ArchiveReportSummary(files: 3, bytes: 1_000, completed: true),
+            records[1].id: ArchiveReportSummary(files: 2, bytes: 500, completed: false),
+        ]
+        let line = ArchiveHistoryScreen.totalsLine(records: records, summaries: summaries)
+        XCTAssertTrue(line.contains("Всего файлов: 5"), line)
+        XCTAssertTrue(line.contains("2 из 3"), line)
+    }
+}

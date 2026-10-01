@@ -7,6 +7,7 @@ struct ArchiveHistoryActions {
     var addFolder: () -> Void = {}
     var reveal: (URL) -> Void = { _ in }
     var openReport: (URL) -> Void = { _ in }
+    var addDropped: ([URL]) -> Void = { _ in }
     var remove: (UUID) -> Void = { _ in }
 }
 
@@ -115,13 +116,19 @@ struct ArchiveHistoryScreen: View {
                 .background(.bar)
         }
         .frame(minWidth: 760, minHeight: 540)
+        .dropDestination(for: URL.self) { urls, _ in
+            let folders = urls.filter { $0.hasDirectoryPath || (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            guard !folders.isEmpty else { return false }
+            actions.addDropped(folders)
+            return true
+        }
     }
 
     private func header(_ summary: ArchiveHistorySummary) -> some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Архивы").font(.title.bold())
-                Text("Папки переноса, созданные на этом Mac")
+                Text(Self.totalsLine(records: records, summaries: summaries))
                     .font(.callout).foregroundStyle(.secondary)
             }
             Spacer(minLength: 12)
@@ -168,6 +175,17 @@ struct ArchiveHistoryScreen: View {
     private var shown: [ArchiveRecord] {
         guard onlyProblems else { return records }
         return records.filter { ArchiveHistorySummary.isProblem(checks[$0.id], last: $0.lastCheck) }
+    }
+
+    /// "Папки переноса, созданные на этом Mac" plus totals from the reports that have been read.
+    static func totalsLine(records: [ArchiveRecord], summaries: [UUID: ArchiveReportSummary]) -> String {
+        let base = "Папки переноса на этом Mac. Перетащите сюда папку из Finder, чтобы добавить её."
+        let known = records.compactMap { summaries[$0.id] }
+        guard !known.isEmpty else { return base }
+        let files = known.reduce(0) { $0 + $1.files }
+        let bytes = known.reduce(Int64(0)) { $0 + $1.bytes }
+        let partial = known.count < records.count ? " (по \(known.count) из \(records.count) отчётов)" : ""
+        return "Всего файлов: \(files), \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))\(partial). Перетащите сюда папку из Finder, чтобы добавить её."
     }
 
     private func countChip(_ title: String, value: Int, tint: Color) -> some View {
