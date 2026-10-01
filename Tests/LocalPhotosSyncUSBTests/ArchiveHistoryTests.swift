@@ -113,8 +113,13 @@ final class ArchiveHistoryRenderTests: XCTestCase {
         let sources: [ArchiveSource] = [.catalog, .usbImport, .catalog, .added, .usbImport]
         let records = sources.enumerated().map { index, source in
             ArchiveRecord(id: UUID(), path: "/Users/me/Архив фото/LocalPhotosSync-2026-09-\(21 - index)",
-                          recordedAt: now.addingTimeInterval(TimeInterval(-index * 86_400)), source: source)
+                          recordedAt: now.addingTimeInterval(TimeInterval(-index * 86_400)), source: source,
+                          lastCheck: index == 4 ? ArchiveLastCheck(at: Date().addingTimeInterval(-3 * 86_400),
+                                                                    outcome: .passed, verifiedFiles: 8) : nil)
         }
+        let summaries = Dictionary(uniqueKeysWithValues: records.prefix(3).enumerated().map { index, record in
+            (record.id, ArchiveReportSummary(files: 12 - index, bytes: Int64(31_000_000 - index * 2_000_000), completed: index != 1))
+        })
         let checks: [UUID: ArchiveCheckState] = [
             records[0].id: .passed(files: 12, at: now),
             records[1].id: .failed(details: "00003/IMG_0102.HEIC: Контрольная сумма не совпадает.\n00007/IMG_0106.HEIC: Файл не найден.\nИмпорт не завершён.\nОжидалось файлов: 12, записано: 10.", at: now),
@@ -127,7 +132,7 @@ final class ArchiveHistoryRenderTests: XCTestCase {
         ]
         for (name, list, size) in cases {
             let view = ArchiveHistoryScreen(records: list, checks: checks, isChecking: false, message: nil,
-                                            actions: ArchiveHistoryActions())
+                                            summaries: summaries, actions: ArchiveHistoryActions())
             let png = try ScreenRenderer.render(view, size: size)
             XCTAssertGreaterThan(png.count, 10_000, name)
             try png.write(to: output.appendingPathComponent("\(name).png"))
