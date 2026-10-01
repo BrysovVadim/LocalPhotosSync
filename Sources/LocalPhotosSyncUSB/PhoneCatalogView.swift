@@ -383,13 +383,14 @@ struct PhoneCatalogView: View {
                 .toggleStyle(.checkbox)
                 .help("Загружать превью при открытии страницы. После ошибки подключения автозагрузка ждёт ручного повтора.")
             Spacer(minLength: 8)
+            let unsaved = pageAssets.filter { !isSaved($0.id, in: snapshot) }
             Button("Выбрать на странице") {
-                selected = PhoneCatalogSelection.adding(pageAssets, to: selected,
+                selected = PhoneCatalogSelection.adding(unsaved, to: selected,
                                                         limit: PhoneCatalogActionState.selectionLimit)
             }
             .disabled(exporter.isExporting || selected.count >= PhoneCatalogActionState.selectionLimit ||
-                      !pageAssets.contains { $0.isTransferable && !selected.contains($0.id) })
-            .help("Добавляет к выбору фото и видео этой страницы, пока выбрано не больше \(PhoneCatalogActionState.selectionLimit). Shift-щелчок по карточке выбирает диапазон от предыдущей.")
+                      !unsaved.contains { $0.isTransferable && !selected.contains($0.id) })
+            .help("Добавляет к выбору ещё не сохранённые фото и видео этой страницы, пока выбрано не больше \(PhoneCatalogActionState.selectionLimit). Сохранённую карточку можно выбрать щелчком. Shift-щелчок выбирает диапазон от предыдущей.")
             ControlGroup {
                 Button {
                     if let size = PhoneCatalogTileSize.smaller(than: tileSize) { tileSize = size }
