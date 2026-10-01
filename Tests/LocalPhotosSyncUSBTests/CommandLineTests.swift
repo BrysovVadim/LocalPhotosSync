@@ -77,13 +77,15 @@ final class CommandLineTests: XCTestCase {
     @MainActor
     func testProbeArchiveVerificationHonorsOverallDeadline() {
         let startedAt = ProcessInfo.processInfo.systemUptime
+        // The worker outlives the deadline by a wide margin so scheduler jitter on shared CI machines
+        // cannot be mistaken for waiting on the worker.
         let result = awaitVerification(reportAt: URL(fileURLWithPath: "/unused"), deadline: startedAt + 0.03) { _ in
-            Thread.sleep(forTimeInterval: 0.15)
+            Thread.sleep(forTimeInterval: 1.0)
             return .success(ArchiveVerification(verifiedFiles: 1, failures: []))
         }
 
         guard case .timedOut = result else { return XCTFail("Expected deadline timeout") }
-        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - startedAt, 0.12)
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - startedAt, 0.5)
     }
 
     func testProbeVerificationTimeoutLeavesReportIncomplete() throws {
