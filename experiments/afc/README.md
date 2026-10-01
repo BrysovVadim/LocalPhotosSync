@@ -58,3 +58,14 @@ python3 -m unittest discover -s Tests/AFCThumbnail
 Пути основаны на [наблюдениях устройства с iOS 16](https://forensicfolder.wordpress.com/2025/09/12/ios-photos-application-forensic-overview/) и [эксперименте с оптимизацией хранения](https://theforensicscooter.com/2022/12/05/do-you-have-a-full-sized-assetor-just-a-thumbnail-did-optimized-iphone-storage-process-occur/). Это не контракт для всех версий iOS. Привязка проверяет телефон, но не неизменность пути после снимка каталога.
 
 Источники: [стандартный AFC/ifuse](https://github.com/libimobiledevice/ifuse#usage), [API AFC](https://github.com/libimobiledevice/libimobiledevice/blob/1.4.0/include/libimobiledevice/afc.h), [исследовательский запрос iOS 17](https://github.com/ScottKjr3347/PhotoData-Synd-Photos.sqlite_Queries/blob/main/iOS17_PhotoData-SyndPL_Photos.sqlite_Queries/1.9.17_iOS17_PhDaPs-or-SyndPs_Assets_REFERENCE.txt).
+
+## Ограниченное копирование доступного файла
+
+```sh
+python3 experiments/afc/run-asset-copy-probe.py --snapshot '/путь/из/snapshotPath' --asset-id 123
+python3 -m unittest discover -s Tests/AFCAssetCopy -v
+```
+
+Один доступный основной файл до 32 МиБ, поток 64 КиБ, дедлайн helper 60 секунд. Источник — только тот USB-iPhone, к которому привязан снимок; автоматической пары, записи и удаления на телефоне нет. Новая приватная папка содержит `media.bin` и отчёты с правами `0600`, без перезаписи. SHA-256 потока рассчитана на Mac; вызывающий код должен независимо перечитать сохранённый файл и сравнить digest. `stableObserved=false` нельзя считать стабильным результатом.
+
+На реальном телефоне PNG 219 786 байт и видео 17 889 288 байт скопированы и независимо проверены. Проверка доступного файла не подтверждает полноту оригинала или Live Photo. Временные результаты — в `.build/phone-asset-copy-probe/`.
