@@ -282,6 +282,52 @@ enum PhoneCatalogDatabase {
 
 }
 
+/// Why the catalog tab cannot read the phone on this Mac, with the step that fixes it.
+enum PhoneCatalogSetupProblem: Equatable {
+    case outsideProject
+    case runnerMissing
+    case runtimeMissing
+    case pythonMissing
+
+    var title: String {
+        switch self {
+        case .outsideProject: "Приложение запущено вне папки проекта"
+        case .runnerMissing: "Не найдены скрипты AFC-пробы"
+        case .runtimeMissing: "AFC runtime не подготовлен"
+        case .pythonMissing: "Не найден python3"
+        }
+    }
+
+    var advice: String {
+        switch self {
+        case .outsideProject:
+            "Каталог читается через инструменты из рабочей папки проекта. Запустите приложение, собранное командой «zsh scripts/build-app.sh», из папки .build проекта. Вкладка «Импорт по USB» работает и без этого."
+        case .runnerMissing:
+            "В папке проекта нет experiments/afc/run-probe.py. Проверьте, что рабочая копия полная."
+        case .runtimeMissing:
+            "Подготовьте runtime один раз по инструкции experiments/afc/README.md: скачайте bottles libimobiledevice через «brew fetch» и выполните «python3.12 experiments/afc/prepare-runtime.py»."
+        case .pythonMissing:
+            "Пробы запускаются через /usr/bin/python3. Установите инструменты командной строки Xcode: «xcode-select --install»."
+        }
+    }
+
+    /// Checks the folder layout the catalog refresh depends on; nil when everything needed is present.
+    static func detect(buildDirectory: URL?, pythonPath: String = "/usr/bin/python3",
+                       fileManager: FileManager = .default) -> PhoneCatalogSetupProblem? {
+        guard let buildDirectory else { return .outsideProject }
+        let repo = buildDirectory.deletingLastPathComponent()
+        guard fileManager.fileExists(atPath: repo.appendingPathComponent("experiments/afc/run-probe.py").path) else {
+            return .runnerMissing
+        }
+        let runtime = buildDirectory.appendingPathComponent("afc-runtime")
+        let hasLibrary = (fileManager.enumerator(at: runtime, includingPropertiesForKeys: nil)?
+            .contains { ($0 as? URL)?.pathExtension == "dylib" }) ?? false
+        guard hasLibrary else { return .runtimeMissing }
+        guard fileManager.isExecutableFile(atPath: pythonPath) else { return .pythonMissing }
+        return nil
+    }
+}
+
 @MainActor
 final class PhoneCatalogReader: ObservableObject {
     @Published private(set) var snapshot: PhoneCatalogSnapshot?
@@ -290,6 +336,8 @@ final class PhoneCatalogReader: ObservableObject {
     @Published private(set) var errorMessage: String?
 
     private let buildDirectory: URL?
+    /// Missing setup that prevents refreshing from the phone; computed once, nil for fixed snapshots.
+    let setupProblem: PhoneCatalogSetupProblem?
 
     convenience init() {
         self.init(buildDirectory: Self.findBuildDirectory())
@@ -298,11 +346,13 @@ final class PhoneCatalogReader: ObservableObject {
     /// Shows a fixed snapshot without reading or refreshing the phone catalog; used for rendering checks.
     init(fixedSnapshot: PhoneCatalogSnapshot) {
         buildDirectory = nil
+        setupProblem = nil
         snapshot = fixedSnapshot
     }
 
     init(buildDirectory: URL?) {
         self.buildDirectory = buildDirectory
+        setupProblem = PhoneCatalogSetupProblem.detect(buildDirectory: buildDirectory)
         if buildDirectory != nil {
             isLoadingSnapshot = true
             Task { await loadLatestSnapshot() }
@@ -317,6 +367,7 @@ final class PhoneCatalogReader: ObservableObject {
             "LocalPhotosSync \(version) — каталог iPhone",
             "macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
             "Build directory found: \(buildDirectory != nil)",
+            "Setup problem: \(setupProblem.map { String(describing: $0) } ?? "none")",
         ]
         if let buildDirectory {
             let fm = FileManager.default

@@ -67,13 +67,30 @@ struct MediaThumbnail: View {
     }
 }
 
-extension View {
-    /// Card padding, selected background and outline shared by both grids.
-    func mediaTileChrome(selected: Bool) -> some View {
-        padding(7)
-            .background(selected ? Color.accentColor.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+/// Card padding, selected background, outline and a light hover highlight shared by both grids.
+private struct MediaTileChrome: ViewModifier {
+    let selected: Bool
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .padding(7)
+            .background(background, in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10)
-                .stroke(selected ? Color.accentColor : Color.secondary.opacity(0.15), lineWidth: selected ? 2 : 1))
+                .stroke(selected ? Color.accentColor : Color.secondary.opacity(hovering ? 0.35 : 0.15),
+                        lineWidth: selected ? 2 : 1))
             .contentShape(RoundedRectangle(cornerRadius: 10))
+            .onHover { hovering = $0 }
+    }
+
+    private var background: Color {
+        if selected { return Color.accentColor.opacity(0.12) }
+        return hovering ? Color.secondary.opacity(0.06) : Color.clear
+    }
+}
+
+extension View {
+    func mediaTileChrome(selected: Bool) -> some View {
+        modifier(MediaTileChrome(selected: selected))
     }
 }

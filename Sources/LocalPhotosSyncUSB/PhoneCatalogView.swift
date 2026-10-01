@@ -81,6 +81,13 @@ struct PhoneCatalogView: View {
                     Text(reader.isRefreshing ? String("Получаем каталог с iPhone…") : String("Читаем сохранённый каталог телефона."))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let problem = reader.setupProblem {
+                ContentUnavailableView {
+                    Label(problem.title, systemImage: "wrench.and.screwdriver")
+                } description: {
+                    Text(problem.advice).textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ContentUnavailableView {
                     Label("Каталог пока не загружен", systemImage: "iphone")

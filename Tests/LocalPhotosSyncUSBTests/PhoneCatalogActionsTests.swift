@@ -179,3 +179,38 @@ final class PhoneCatalogCSVTests: XCTestCase {
         XCTAssertEqual(lines.count, 5, "Trailing CRLF after the last row")
     }
 }
+
+final class PhoneCatalogSetupProblemTests: XCTestCase {
+    func testDetectsEachMissingPieceInOrder() throws {
+        let repo = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let build = repo.appendingPathComponent(".build", isDirectory: true)
+        try FileManager.default.createDirectory(at: build, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repo) }
+
+        XCTAssertEqual(PhoneCatalogSetupProblem.detect(buildDirectory: nil), .outsideProject)
+        XCTAssertEqual(PhoneCatalogSetupProblem.detect(buildDirectory: build), .runnerMissing)
+
+        let scripts = repo.appendingPathComponent("experiments/afc", isDirectory: true)
+        try FileManager.default.createDirectory(at: scripts, withIntermediateDirectories: true)
+        try Data("print()".utf8).write(to: scripts.appendingPathComponent("run-probe.py"))
+        XCTAssertEqual(PhoneCatalogSetupProblem.detect(buildDirectory: build), .runtimeMissing)
+
+        let lib = build.appendingPathComponent("afc-runtime/lib", isDirectory: true)
+        try FileManager.default.createDirectory(at: lib, withIntermediateDirectories: true)
+        try Data().write(to: lib.appendingPathComponent("libimobiledevice.dylib"))
+        XCTAssertEqual(PhoneCatalogSetupProblem.detect(buildDirectory: build, pythonPath: "/nonexistent/python3"), .pythonMissing)
+        XCTAssertNil(PhoneCatalogSetupProblem.detect(buildDirectory: build, pythonPath: "/bin/sh"))
+        XCTAssertFalse(PhoneCatalogSetupProblem.runtimeMissing.advice.isEmpty)
+    }
+}
+
+/// Renders the catalog's setup-problem state (needs `LPS_RENDER_DIR`).
+@MainActor
+final class PhoneCatalogSetupRenderTests: XCTestCase {
+    func testRendersSetupProblem() throws {
+        let output = try ScreenRenderer.outputDirectory()
+        let view = PhoneCatalogView(exporter: PhoneAssetExporter(), reader: PhoneCatalogReader(buildDirectory: nil))
+        try ScreenRenderer.render(view, size: CGSize(width: 1060, height: 760))
+            .write(to: output.appendingPathComponent("catalog-setup-problem.png"))
+    }
+}
