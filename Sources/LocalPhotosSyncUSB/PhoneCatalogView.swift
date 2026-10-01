@@ -23,6 +23,9 @@ struct PhoneCatalogView: View {
     private var selectedAssets: [PhoneCatalogAsset] {
         reader.snapshot?.assets.filter { selected.contains($0.id) } ?? []
     }
+    private var canExportLivePhoto: Bool {
+        selectedAssets.count == 1 && selectedAssets[0].isVisibleLibraryItem && selectedAssets[0].mediaType == .photo
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -107,8 +110,11 @@ struct PhoneCatalogView: View {
                         Label(exporter.isExporting ? "Сохраняем…" : "Сохранить выбранные файлы…", systemImage: "square.and.arrow.down")
                     }
                     .disabled(selectedAssets.isEmpty || selectedAssets.count > 12 || exporter.isExporting || thumbnails.isLoading || reader.isRefreshing || reader.isLoadingSnapshot)
-                    Text("Первый прогон: до 12 файлов, каждый до 32 МБ")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Сохранить Live Photo…") {
+                        chooseExportFolder(for: snapshot, livePhoto: true)
+                    }
+                    .disabled(!canExportLivePhoto || exporter.isExporting || thumbnails.isLoading || reader.isRefreshing || reader.isLoadingSnapshot)
+                    .help("Выберите одну Live Photo. Сохраняются доступные фото и видео неотредактированного снимка; каждый файл до 32 МБ.")
                     if exporter.isExporting {
                         Button("Остановить") { exporter.cancel() }
                     }
@@ -117,6 +123,8 @@ struct PhoneCatalogView: View {
                         Button("Открыть папку") { NSWorkspace.shared.open(folder) }
                     }
                 }
+                Text("Файлы: до 12, каждый до 32 МБ. Live Photo: один снимок вместе с его видео.")
+                    .font(.caption).foregroundStyle(.secondary)
                 if let message = exporter.message {
                     Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 }
@@ -137,7 +145,7 @@ struct PhoneCatalogView: View {
                         .font(.caption).monospacedDigit()
                     Button("Следующая") { page = min(pageCount - 1, page + 1) }.disabled(page >= pageCount - 1)
                     Spacer()
-                    Text("Сохраняется доступный файл. Полнота оригинала и Live Photo ещё не проверена.")
+                    Text("Полнота оригиналов и данных правок пока не подтверждена.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } else if reader.isRefreshing || reader.isLoadingSnapshot {
@@ -232,16 +240,22 @@ struct PhoneCatalogView: View {
         }
     }
 
-    private func chooseExportFolder(for snapshot: PhoneCatalogSnapshot) {
+    private func chooseExportFolder(for snapshot: PhoneCatalogSnapshot, livePhoto: Bool = false) {
+        let assets = selectedAssets
+        guard !livePhoto || (assets.count == 1 && assets[0].isVisibleLibraryItem && assets[0].mediaType == .photo) else { return }
         let panel = NSOpenPanel()
-        panel.title = "Сохранить доступные файлы с iPhone"
+        panel.title = livePhoto ? "Сохранить Live Photo с iPhone" : "Сохранить доступные файлы с iPhone"
         panel.prompt = "Сохранить сюда"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        exporter.export(assets: selectedAssets, snapshot: snapshot, destination: destination)
+        if livePhoto {
+            exporter.exportLivePhoto(asset: assets[0], snapshot: snapshot, destination: destination)
+        } else {
+            exporter.export(assets: assets, snapshot: snapshot, destination: destination)
+        }
     }
 
     private func countCard(title: String, detail: String, photos: Int, videos: Int) -> some View {

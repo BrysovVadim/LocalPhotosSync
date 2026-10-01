@@ -11,6 +11,13 @@ enum PhoneAssetCopyProbeResult: Sendable {
     case cancelled
 }
 
+enum PhoneLivePhotoProbeResult: Sendable {
+    case verified(folder: URL)
+    case failed(status: String)
+    case timedOut
+    case cancelled
+}
+
 final class PhoneAssetExportCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
@@ -28,6 +35,22 @@ private struct PhoneAssetExportOutcome: Sendable {
     let message: String
 }
 
+private struct VerifiedLivePhotoProof {
+    let proofFolder: URL
+    let imageFolder: URL
+    let movieFolder: URL
+    let imageFile: URL
+    let movieFile: URL
+    let imageReceipt: URL
+    let movieReceipt: URL
+    let context: URL
+    let completion: URL
+    let imageBytes: Int64
+    let movieBytes: Int64
+    let imageSHA256: String
+    let movieSHA256: String
+}
+
 private enum PhoneAssetExportError: Error {
     case invalidSnapshot
     case unsafeFilename
@@ -38,11 +61,21 @@ private enum PhoneAssetExportError: Error {
     case copyFailed
     case cancelled
     case timedOut
+    case livePhotoUnavailable
+    case livePhotoInvalid
+}
+
+private enum PhoneProbeProcessResult {
+    case completed(Data, Int32)
+    case failed(String)
+    case timedOut
+    case cancelled
 }
 
 @MainActor
 final class PhoneAssetExporter: ObservableObject {
     typealias ProbeRunner = @Sendable (Int64, URL, TimeInterval, PhoneAssetExportCancellation) -> PhoneAssetCopyProbeResult
+    typealias LivePhotoProbeRunner = @Sendable (Int64, URL, TimeInterval, PhoneAssetExportCancellation) -> PhoneLivePhotoProbeResult
 
     nonisolated static let processGroupLauncherSource = """
     import os,sys,signal
@@ -77,12 +110,16 @@ final class PhoneAssetExporter: ObservableObject {
     @Published private(set) var sourceFolder: URL?
 
     private let probeRunner: ProbeRunner
+    private let livePhotoProbeRunner: LivePhotoProbeRunner
     private var activeCancellation: PhoneAssetExportCancellation?
 
     init(probeRunner: @escaping ProbeRunner = { assetID, snapshotFolder, timeout, cancellation in
         PhoneAssetExporter.runProbe(assetID, snapshotFolder, timeout, cancellation)
+    }, livePhotoProbeRunner: @escaping LivePhotoProbeRunner = { assetID, snapshotFolder, timeout, cancellation in
+        PhoneAssetExporter.runLivePhotoProbe(assetID, snapshotFolder, timeout, cancellation)
     }) {
         self.probeRunner = probeRunner
+        self.livePhotoProbeRunner = livePhotoProbeRunner
     }
 
     func cancel() {
@@ -120,6 +157,46 @@ final class PhoneAssetExporter: ObservableObject {
                 await Task.detached(priority: .userInitiated) {
                     Self.performExport(assets: assets, snapshotFolder: snapshot.sourceFolder,
                                        destination: destination, runner: runner, cancellation: cancellation)
+                }.value
+            } onCancel: {
+                cancellation.cancel()
+            }
+            outputFolder = result.folder
+            exportedCount = result.exported
+            failedCount = result.failed
+            savedAssetIDs = result.savedAssetIDs
+            failedAssetIDs = result.failedAssetIDs
+            message = result.message
+            activeCancellation = nil
+            isExporting = false
+        }
+    }
+
+    func exportLivePhoto(asset: PhoneCatalogAsset, snapshot: PhoneCatalogSnapshot, destination: URL) {
+        guard !isExporting else { return }
+        sourceFolder = snapshot.sourceFolder
+        outputFolder = nil
+        exportedCount = 0
+        failedCount = 0
+        savedAssetIDs = []
+        failedAssetIDs = []
+        guard asset.id > 0, asset.isVisibleLibraryItem, asset.mediaType == .photo,
+              Self.safeFilename(asset.filename) else {
+            failedCount = 1
+            failedAssetIDs = [asset.id]
+            message = "Выберите одно видимое фото из медиатеки."
+            return
+        }
+        isExporting = true
+        message = "Проверяем и сохраняем пару Live Photo…"
+        let cancellation = PhoneAssetExportCancellation()
+        activeCancellation = cancellation
+        let runner = livePhotoProbeRunner
+        Task { [self] in
+            let result = await withTaskCancellationHandler {
+                await Task.detached(priority: .userInitiated) {
+                    Self.performLivePhotoExport(asset: asset, snapshotFolder: snapshot.sourceFolder,
+                        destination: destination, runner: runner, cancellation: cancellation)
                 }.value
             } onCancel: {
                 cancellation.cancel()
@@ -271,6 +348,206 @@ final class PhoneAssetExporter: ObservableObject {
                                        message: finalMessage)
     }
 
+    nonisolated private static func performLivePhotoExport(
+        asset: PhoneCatalogAsset, snapshotFolder: URL, destination: URL,
+        runner: @escaping LivePhotoProbeRunner, cancellation: PhoneAssetExportCancellation
+    ) -> PhoneAssetExportOutcome {
+        guard asset.id > 0, asset.mediaType == .photo, asset.isVisibleLibraryItem,
+              safeFilename(asset.filename), let repository = repositoryRoot(for: snapshotFolder),
+              isDirectoryWithoutSymlink(destination) else {
+            return PhoneAssetExportOutcome(folder: nil, exported: 0, failed: 1,
+                savedAssetIDs: [], failedAssetIDs: [asset.id], message: "Выбранная Live Photo недоступна или не поддерживается.")
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 240
+        let runFolder = destination.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: runFolder, withIntermediateDirectories: false)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: runFolder.path)
+            guard isPrivateDirectory(runFolder) else { throw PhoneAssetExportError.copyFailed }
+        } catch {
+            return PhoneAssetExportOutcome(folder: nil, exported: 0, failed: 1,
+                savedAssetIDs: [], failedAssetIDs: [asset.id], message: "Не удалось создать закрытую папку экспорта.")
+        }
+        let startedAt = Date()
+        let reportURL = runFolder.appendingPathComponent("import-report.json")
+        var files: [FileReceipt] = []
+        var errors: [String] = []
+        do { try writeReport(startedAt: startedAt, files: files, errors: errors, expected: 1, completed: false, to: runFolder) }
+        catch {
+            return PhoneAssetExportOutcome(folder: runFolder, exported: 0, failed: 1,
+                savedAssetIDs: [], failedAssetIDs: [asset.id], message: "Не удалось создать незавершённый отчёт.")
+        }
+
+        do {
+            try ensureActive(cancellation, deadline: deadline)
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { throw PhoneAssetExportError.timedOut }
+            let probe = runner(asset.id, snapshotFolder, min(210, remaining), cancellation)
+            try ensureActive(cancellation, deadline: deadline)
+            let proofFolder: URL
+            switch probe {
+            case .verified(let folder): proofFolder = folder
+            case .failed(let status):
+                if status == "live_photo_candidate_unavailable" || status == "asset_unavailable" ||
+                    status == "source_binding_mismatch" || status == "source_binding_unavailable" {
+                    throw PhoneAssetExportError.livePhotoUnavailable
+                }
+                throw PhoneAssetExportError.livePhotoInvalid
+            case .timedOut: throw PhoneAssetExportError.timedOut
+            case .cancelled: throw PhoneAssetExportError.cancelled
+            }
+            try ensureActive(cancellation, deadline: deadline)
+            let proof = try validateLivePhotoProof(proofFolder, asset: asset, snapshotFolder: snapshotFolder,
+                                                   repository: repository, cancellation: cancellation, deadline: deadline)
+            try ensureActive(cancellation, deadline: deadline)
+
+            let itemFolder = runFolder.appendingPathComponent("00001", isDirectory: true)
+            try FileManager.default.createDirectory(at: itemFolder, withIntermediateDirectories: false)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: itemFolder.path)
+            let stem = URL(fileURLWithPath: asset.filename).deletingPathExtension().lastPathComponent
+            let movieName = stem + ".MOV"
+            guard safeFilename(movieName) else { throw PhoneAssetExportError.unsafeFilename }
+            try copyRegularFile(proof.imageFile, to: itemFolder.appendingPathComponent(asset.filename),
+                                expectedBytes: proof.imageBytes, cancellation: cancellation, deadline: deadline)
+            try copyRegularFile(proof.movieFile, to: itemFolder.appendingPathComponent(movieName),
+                                expectedBytes: proof.movieBytes, cancellation: cancellation, deadline: deadline)
+            try copyRegularFile(proof.completion, to: itemFolder.appendingPathComponent("phone-live-photo-complete.json"),
+                                expectedBytes: fileSize(proof.completion) ?? 0, cancellation: cancellation, deadline: deadline)
+            try copyRegularFile(proof.context, to: itemFolder.appendingPathComponent("phone-live-photo-context.json"),
+                                expectedBytes: fileSize(proof.context) ?? 0, cancellation: cancellation, deadline: deadline)
+            try copyRegularFile(proof.imageReceipt, to: itemFolder.appendingPathComponent("phone-live-photo-image-receipt.json"),
+                                expectedBytes: fileSize(proof.imageReceipt) ?? 0, cancellation: cancellation, deadline: deadline)
+            try copyRegularFile(proof.movieReceipt, to: itemFolder.appendingPathComponent("phone-live-photo-movie-receipt.json"),
+                                expectedBytes: fileSize(proof.movieReceipt) ?? 0, cancellation: cancellation, deadline: deadline)
+
+            try ensureActive(cancellation, deadline: deadline)
+            let primary = try FileReceipt.verify(url: itemFolder.appendingPathComponent(asset.filename),
+                                                 sourceName: asset.filename, sourceBytes: proof.imageBytes)
+            let expectedCompanions: Set<String> = [movieName, "phone-live-photo-complete.json",
+                "phone-live-photo-context.json", "phone-live-photo-image-receipt.json", "phone-live-photo-movie-receipt.json"]
+            guard primary.sha256 == proof.imageSHA256,
+                  Set(primary.companions.map(\.filename)) == expectedCompanions,
+                  let movieReceipt = primary.companions.first(where: { $0.filename == movieName }),
+                  movieReceipt.bytes == proof.movieBytes, movieReceipt.sha256 == proof.movieSHA256 else {
+                throw PhoneAssetExportError.invalidReceipt
+            }
+            files = [primary]
+            try writeReport(startedAt: startedAt, files: files, errors: [], expected: 1, completed: false, to: runFolder)
+            try ensureActive(cancellation, deadline: deadline)
+            try writeReport(startedAt: startedAt, files: files, errors: [], expected: 1, completed: true, to: runFolder)
+            let verification = try ArchiveVerification.verify(reportAt: reportURL)
+            try ensureActive(cancellation, deadline: deadline)
+            guard verification.isValid, verification.verifiedFiles == 1 else {
+                throw PhoneAssetExportError.invalidReceipt
+            }
+            return PhoneAssetExportOutcome(folder: runFolder, exported: 1, failed: 0,
+                savedAssetIDs: [asset.id], failedAssetIDs: [],
+                message: "Пара Live Photo сохранена и проверена локально. Полнота облачной медиатеки не подтверждена.")
+        } catch {
+            errors.append(errorMessage(error, index: 1))
+            try? writeReport(startedAt: startedAt, files: files, errors: errors, expected: 1, completed: false, to: runFolder)
+            return PhoneAssetExportOutcome(folder: runFolder, exported: 0, failed: 1,
+                savedAssetIDs: [], failedAssetIDs: [asset.id], message: errorMessage(error, index: 1))
+        }
+    }
+
+    nonisolated private static func validateLivePhotoProof(
+        _ folder: URL, asset: PhoneCatalogAsset, snapshotFolder: URL, repository: URL,
+        cancellation: PhoneAssetExportCancellation, deadline: TimeInterval
+    ) throws -> VerifiedLivePhotoProof {
+        let proofRoot = repository.appendingPathComponent(".build/phone-live-photo-proof", isDirectory: true)
+        let cacheRoot = repository.appendingPathComponent(".build/phone-asset-copy-probe", isDirectory: true)
+        guard isContained(folder, in: proofRoot), isPrivateDirectory(folder) else { throw PhoneAssetExportError.invalidReceipt }
+        let suffix = URL(fileURLWithPath: asset.filename).pathExtension
+        guard !suffix.isEmpty, suffix.utf8.count <= 8,
+              suffix.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) }) else {
+            throw PhoneAssetExportError.unsafeFilename
+        }
+        let imageFile = folder.appendingPathComponent("still." + suffix)
+        let movieFile = folder.appendingPathComponent("motion.MOV")
+        let contextURL = folder.appendingPathComponent("pair-context.json")
+        let completionURL = folder.appendingPathComponent("complete.json")
+        let verifierInputsURL = folder.appendingPathComponent("verifier-inputs.json")
+        guard Set((try FileManager.default.contentsOfDirectory(atPath: folder.path))) ==
+            Set(["pair-context.json", "complete.json", "verifier-inputs.json", "still." + suffix, "motion.MOV"]) else {
+            throw PhoneAssetExportError.invalidReceipt
+        }
+        let contextData = try readPrivateData(contextURL, limit: 8192)
+        guard let context = try JSONSerialization.jsonObject(with: contextData) as? [String: Any],
+              Set(context.keys) == Set(["sourceSnapshot", "assetID", "imageName", "movieName", "imageResourceBytes", "movieResourceBytes"]),
+              context["sourceSnapshot"] as? String == snapshotFolder.resolvingSymlinksInPath().path,
+              integer(context["assetID"]) == asset.id, context["imageName"] as? String == asset.filename,
+              context["movieName"] as? String == URL(fileURLWithPath: asset.filename).deletingPathExtension().lastPathComponent + ".MOV",
+              let imageBytes = integer(context["imageResourceBytes"]), imageBytes > 0, imageBytes <= 32 * 1024 * 1024,
+              let movieBytes = integer(context["movieResourceBytes"]), movieBytes > 0, movieBytes <= 32 * 1024 * 1024,
+              imageBytes + movieBytes <= 64 * 1024 * 1024 else { throw PhoneAssetExportError.invalidReceipt }
+        let completionData = try readPrivateData(completionURL, limit: 2048)
+        guard let completion = try JSONSerialization.jsonObject(with: completionData) as? [String: Any],
+              Set(completion.keys) == Set(["source", "status", "imageBytes", "movieBytes", "verified"]),
+              completion["source"] as? String == "iphone_afc", completion["status"] as? String == "live_photo_pair_verified",
+              completion["verified"] as? Bool == true, integer(completion["imageBytes"]) == imageBytes,
+              integer(completion["movieBytes"]) == movieBytes else { throw PhoneAssetExportError.invalidReceipt }
+        let verifierData = try readPrivateData(verifierInputsURL, limit: 8192)
+        guard let inputs = try JSONSerialization.jsonObject(with: verifierData) as? [String: Any],
+              Set(inputs.keys) == Set(["imageFile", "movieFile", "imageFolder", "movieFolder", "proofFolder"]),
+              inputs["imageFile"] as? String == imageFile.path, inputs["movieFile"] as? String == movieFile.path,
+              inputs["proofFolder"] as? String == folder.path,
+              let imageFolderPath = inputs["imageFolder"] as? String,
+              let movieFolderPath = inputs["movieFolder"] as? String else { throw PhoneAssetExportError.invalidReceipt }
+        let imageFolder = URL(fileURLWithPath: imageFolderPath, isDirectory: true)
+        let movieFolder = URL(fileURLWithPath: movieFolderPath, isDirectory: true)
+        guard imageFolder.standardizedFileURL != movieFolder.standardizedFileURL,
+              isContained(imageFolder, in: cacheRoot), isContained(movieFolder, in: cacheRoot),
+              isPrivateDirectory(imageFolder), isPrivateDirectory(movieFolder) else { throw PhoneAssetExportError.invalidReceipt }
+        try ensureActive(cancellation, deadline: deadline)
+        let imageReceipt = try validateLivePhotoCopy(imageFolder, expectedBytes: imageBytes,
+                                                     cancellation: cancellation, deadline: deadline)
+        let movieReceipt = try validateLivePhotoCopy(movieFolder, expectedBytes: movieBytes,
+                                                     cancellation: cancellation, deadline: deadline)
+        guard isRegularPrivateFile(imageFile), isRegularPrivateFile(movieFile),
+              fileSize(imageFile) == imageBytes, fileSize(movieFile) == movieBytes else {
+            throw PhoneAssetExportError.invalidReceipt
+        }
+        let imageDigest = try hashPrivateFile(imageFile, limit: 32 * 1024 * 1024,
+                                               cancellation: cancellation, deadline: deadline)
+        let movieDigest = try hashPrivateFile(movieFile, limit: 32 * 1024 * 1024,
+                                               cancellation: cancellation, deadline: deadline)
+        guard imageDigest.bytes == imageBytes, imageDigest.sha256 == imageReceipt.hash,
+              movieDigest.bytes == movieBytes, movieDigest.sha256 == movieReceipt.hash else {
+            throw PhoneAssetExportError.invalidReceipt
+        }
+        return VerifiedLivePhotoProof(proofFolder: folder, imageFolder: imageFolder, movieFolder: movieFolder,
+            imageFile: imageFile, movieFile: movieFile, imageReceipt: imageReceipt.url,
+            movieReceipt: movieReceipt.url, context: contextURL, completion: completionURL,
+            imageBytes: imageBytes, movieBytes: movieBytes, imageSHA256: imageDigest.sha256,
+            movieSHA256: movieDigest.sha256)
+    }
+
+    nonisolated private static func validateLivePhotoCopy(
+        _ folder: URL, expectedBytes: Int64, cancellation: PhoneAssetExportCancellation, deadline: TimeInterval
+    ) throws -> (url: URL, hash: String) {
+        guard Set((try FileManager.default.contentsOfDirectory(atPath: folder.path))) == Set(["media.bin", "copy-receipt.json"]) else {
+            throw PhoneAssetExportError.invalidReceipt
+        }
+        let receiptURL = folder.appendingPathComponent("copy-receipt.json")
+        let data = try readPrivateData(receiptURL, limit: 2048)
+        guard let receipt = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(receipt.keys) == Set(["source", "status", "declaredBytes", "copiedBytes", "stableObserved", "receivedStreamSHA256"]),
+              receipt["source"] as? String == "iphone_afc", receipt["status"] as? String == "asset_copy_complete",
+              receipt["stableObserved"] as? Bool == true,
+              integer(receipt["declaredBytes"]) == expectedBytes, integer(receipt["copiedBytes"]) == expectedBytes,
+              let hash = receipt["receivedStreamSHA256"] as? String,
+              hash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+            throw PhoneAssetExportError.invalidReceipt
+        }
+        let media = folder.appendingPathComponent("media.bin")
+        guard isRegularPrivateFile(media), fileSize(media) == expectedBytes else { throw PhoneAssetExportError.invalidReceipt }
+        let digest = try hashPrivateFile(media, limit: 32 * 1024 * 1024,
+                                         cancellation: cancellation, deadline: deadline)
+        guard digest.bytes == expectedBytes, digest.sha256 == hash else { throw PhoneAssetExportError.invalidReceipt }
+        return (receiptURL, hash)
+    }
+
     nonisolated private static func verifyCacheCopy(
         _ folder: URL, asset: PhoneCatalogAsset, snapshotFolder: URL, repository: URL, expectedBytes: Int64,
         cancellation: PhoneAssetExportCancellation, deadline: TimeInterval
@@ -390,22 +667,88 @@ final class PhoneAssetExporter: ObservableObject {
         guard !cancellation.isCancelled, assetID > 0, timeout.isFinite, timeout > 0, timeout <= 75,
               let repository = repositoryRoot(for: snapshotFolder) else { return .failed(status: "invalid_arguments") }
         let script = overrideScriptURL ?? repository.appendingPathComponent("experiments/afc/run-asset-copy-probe.py")
+        let execution = runPythonProbe(script, arguments: ["--snapshot", snapshotFolder.path, "--asset-id", String(assetID)],
+                                       repository: repository, timeout: timeout, cancellation: cancellation)
+        let data: Data
+        let exitCode: Int32
+        switch execution {
+        case .completed(let output, let code): data = output; exitCode = code
+        case .failed(let status): return .failed(status: status)
+        case .timedOut: return .timedOut
+        case .cancelled: return .cancelled
+        }
+        guard data.count <= 16 * 1024,
+              let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(result.keys) == Set(["source", "status", "copiedBytes", "stableObserved", "localFolder"]),
+              result["source"] as? String == "iphone_afc",
+              let status = result["status"] as? String else { return .failed(status: "invalid_output") }
+        if status != "asset_copy_complete" { return .failed(status: status) }
+        guard exitCode == 0,
+              let bytes = integer(result["copiedBytes"]), bytes > 0, bytes <= 32 * 1024 * 1024,
+              let folderPath = result["localFolder"] as? String else { return .failed(status: "copy_unverified") }
+        guard result["stableObserved"] as? Bool == true else { return .failed(status: "asset_changed") }
+        let folder = URL(fileURLWithPath: folderPath, isDirectory: true)
+        let cacheRoot = repository.appendingPathComponent(".build/phone-asset-copy-probe", isDirectory: true)
+        guard isContained(folder, in: cacheRoot) else { return .failed(status: "copy_path_invalid") }
+        return .copied(folder: folder, bytes: bytes, stableObserved: true)
+    }
+
+    nonisolated private static func runLivePhotoProbe(_ assetID: Int64, _ snapshotFolder: URL, _ timeout: TimeInterval,
+                                                       _ cancellation: PhoneAssetExportCancellation) -> PhoneLivePhotoProbeResult {
+        guard !cancellation.isCancelled, assetID > 0, timeout.isFinite, timeout > 0, timeout <= 210,
+              let repository = repositoryRoot(for: snapshotFolder) else { return .failed(status: "invalid_arguments") }
+        let script = repository.appendingPathComponent("experiments/afc/run-live-photo-copy-probe.py")
+        let execution = runPythonProbe(script, arguments: ["--snapshot", snapshotFolder.path, "--asset-id", String(assetID)],
+                                       repository: repository, timeout: timeout, cancellation: cancellation)
+        let data: Data
+        let exitCode: Int32
+        switch execution {
+        case .completed(let output, let code): data = output; exitCode = code
+        case .failed(let status): return .failed(status: status)
+        case .timedOut: return .timedOut
+        case .cancelled: return .cancelled
+        }
+        let keys: Set<String> = ["source", "status", "copiedImages", "copiedMovies", "copiedBytes", "verified", "localFolder"]
+        guard data.count <= 16 * 1024,
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(value.keys) == keys, value["source"] as? String == "iphone_afc",
+              let status = value["status"] as? String else { return .failed(status: "invalid_output") }
+        guard status.range(of: "^[a-z0-9_]{1,64}$", options: .regularExpression) != nil else {
+            return .failed(status: "invalid_output")
+        }
+        guard status == "live_photo_pair_verified", exitCode == 0, value["verified"] as? Bool == true,
+              integer(value["copiedImages"]) == 1, integer(value["copiedMovies"]) == 1,
+              let total = integer(value["copiedBytes"]), total > 0, total <= 64 * 1024 * 1024,
+              let folderPath = value["localFolder"] as? String else {
+            return .failed(status: status == "live_photo_pair_verified" ? "live_photo_verification_failed" : status)
+        }
+        let folder = URL(fileURLWithPath: folderPath, isDirectory: true)
+        let proofRoot = repository.appendingPathComponent(".build/phone-live-photo-proof", isDirectory: true)
+        guard isContained(folder, in: proofRoot), isPrivateDirectory(folder) else {
+            return .failed(status: "live_photo_path_invalid")
+        }
+        return .verified(folder: folder)
+    }
+
+    nonisolated private static func runPythonProbe(_ script: URL, arguments: [String], repository: URL,
+                                                    timeout: TimeInterval,
+                                                    cancellation: PhoneAssetExportCancellation) -> PhoneProbeProcessResult {
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = ["-c", processGroupLauncherSource, script.path, "--snapshot", snapshotFolder.path, "--asset-id", String(assetID)]
+        process.arguments = ["-c", processGroupLauncherSource, script.path] + arguments
         process.currentDirectoryURL = repository
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "USBMUXD_SOCKET_ADDRESS")
         process.environment = environment
-        do { try process.run() } catch { return .failed(status: "process_error") }
+        do { try process.run() } catch { return .failed("process_error") }
         let outputFD = output.fileHandleForReading.fileDescriptor
         let flags = fcntl(outputFD, F_GETFL)
         guard flags >= 0, fcntl(outputFD, F_SETFL, flags | O_NONBLOCK) == 0 else {
             terminateLauncher(process, groupPID: nil)
-            return .failed(status: "process_error")
+            return .failed("process_error")
         }
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         var groupPID: pid_t?
@@ -432,49 +775,35 @@ final class PhoneAssetExporter: ObservableObject {
                             let line = String(decoding: readiness[..<newline], as: UTF8.self)
                             guard line.hasPrefix("READY:"), let value = Int32(line.dropFirst(6)), value > 0 else {
                                 terminateLauncher(process, groupPID: nil)
-                                return .failed(status: "process_error")
+                                return .failed("process_error")
                             }
                             groupPID = pid_t(value)
                             stdout.append(readiness[(newline + 1)...])
                             readiness.removeAll()
                         } else if readiness.count > 64 {
                             terminateLauncher(process, groupPID: nil)
-                            return .failed(status: "process_error")
+                            return .failed("process_error")
                         }
                     } else {
                         stdout.append(bytes)
                     }
                     guard stdout.count <= 16 * 1024 else {
                         terminateLauncher(process, groupPID: groupPID)
-                        return .failed(status: "invalid_output")
+                        return .failed("invalid_output")
                     }
                     continue
                 }
                 if count == 0 { reachedEOF = true; break }
                 if errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR {
                     terminateLauncher(process, groupPID: groupPID)
-                    return .failed(status: "process_error")
+                    return .failed("process_error")
                 }
                 break
             }
-            if groupPID == nil && !process.isRunning { return .failed(status: "process_error") }
+            if groupPID == nil && !process.isRunning { return .failed("process_error") }
             if process.isRunning || !reachedEOF { Thread.sleep(forTimeInterval: 0.025) }
         }
-        let data = stdout
-        guard data.count <= 16 * 1024,
-              let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(result.keys) == Set(["source", "status", "copiedBytes", "stableObserved", "localFolder"]),
-              result["source"] as? String == "iphone_afc",
-              let status = result["status"] as? String else { return .failed(status: "invalid_output") }
-        if status != "asset_copy_complete" { return .failed(status: status) }
-        guard process.terminationStatus == 0,
-              let bytes = integer(result["copiedBytes"]), bytes > 0, bytes <= 32 * 1024 * 1024,
-              let folderPath = result["localFolder"] as? String else { return .failed(status: "copy_unverified") }
-        guard result["stableObserved"] as? Bool == true else { return .failed(status: "asset_changed") }
-        let folder = URL(fileURLWithPath: folderPath, isDirectory: true)
-        let cacheRoot = repository.appendingPathComponent(".build/phone-asset-copy-probe", isDirectory: true)
-        guard isContained(folder, in: cacheRoot) else { return .failed(status: "copy_path_invalid") }
-        return .copied(folder: folder, bytes: bytes, stableObserved: true)
+        return .completed(stdout, process.terminationStatus)
     }
 
     nonisolated private static func terminateLauncher(_ process: Process, groupPID: pid_t?) {
@@ -557,6 +886,8 @@ final class PhoneAssetExporter: ObservableObject {
         switch error as? PhoneAssetExportError {
         case .cancelled: reason = "экспорт отменён"
         case .timedOut: reason = "достигнут общий лимит времени экспорта"
+        case .livePhotoUnavailable: reason = "выбранная Live Photo недоступна или не поддерживается"
+        case .livePhotoInvalid: reason = "не удалось проверить пару Live Photo"
         case .unavailable: reason = "файл недоступен на телефоне"
         case .tooLarge: reason = "файл превышает лимит размера"
         case .changed: reason = "файл изменился во время чтения"

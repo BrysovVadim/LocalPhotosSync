@@ -103,6 +103,126 @@ final class PhoneAssetExporterTests: XCTestCase {
         XCTAssertEqual(exporter.failedAssetIDs, [71])
     }
 
+    @MainActor
+    func testSuccessfulLivePhotoPairProducesOnePrimaryFileAndManifestedMovieCompanion() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let asset = makeAsset(id: 81, filename: "IMG_0081.HEIC", type: .photo)
+        let proof = try makeLivePhotoProof(in: fixture, asset: asset)
+        let exporter = PhoneAssetExporter(livePhotoProbeRunner: { _, _, _, _ in .verified(folder: proof.folder) })
+
+        exporter.exportLivePhoto(asset: asset, snapshot: fixture.snapshot, destination: fixture.destination)
+        await waitForCompletion(exporter)
+
+        XCTAssertEqual(exporter.savedAssetIDs, [81])
+        XCTAssertTrue(exporter.failedAssetIDs.isEmpty)
+        XCTAssertEqual(exporter.exportedCount, 1)
+        let runFolder = try XCTUnwrap(exporter.outputFolder)
+        let itemFolder = runFolder.appendingPathComponent("00001", isDirectory: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: itemFolder.appendingPathComponent("IMG_0081.HEIC").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: itemFolder.appendingPathComponent("IMG_0081.MOV").path))
+        let reportURL = runFolder.appendingPathComponent("import-report.json")
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: reportURL)) as? [String: Any])
+        XCTAssertEqual(report["completed"] as? Bool, true)
+        XCTAssertEqual(report["expectedFileCount"] as? Int, 1)
+        XCTAssertEqual((report["files"] as? [[String: Any]])?.count, 1)
+        let companionNames = Set((report["companionFiles"] as? [[String: Any]])?.compactMap { $0["path"] as? String } ?? [])
+        XCTAssertEqual(companionNames, Set([
+            "00001/IMG_0081.MOV", "00001/phone-live-photo-complete.json",
+            "00001/phone-live-photo-context.json", "00001/phone-live-photo-image-receipt.json",
+            "00001/phone-live-photo-movie-receipt.json",
+        ]))
+        let verification = try ArchiveVerification.verify(reportAt: reportURL)
+        XCTAssertTrue(verification.isValid, "\(verification.failures)")
+        XCTAssertEqual(verification.verifiedFiles, 1)
+    }
+
+    @MainActor
+    func testMissingLivePhotoMovieRefusesCompletion() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let asset = makeAsset(id: 82, filename: "IMG_0082.HEIC", type: .photo)
+        let proof = try makeLivePhotoProof(in: fixture, asset: asset, missingMovie: true)
+        let exporter = PhoneAssetExporter(livePhotoProbeRunner: { _, _, _, _ in .verified(folder: proof.folder) })
+
+        exporter.exportLivePhoto(asset: asset, snapshot: fixture.snapshot, destination: fixture.destination)
+        await waitForCompletion(exporter)
+
+        XCTAssertTrue(exporter.savedAssetIDs.isEmpty)
+        XCTAssertEqual(exporter.failedAssetIDs, [82])
+        let reportURL = try XCTUnwrap(exporter.outputFolder).appendingPathComponent("import-report.json")
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: reportURL)) as? [String: Any])
+        XCTAssertEqual(report["completed"] as? Bool, false)
+        XCTAssertEqual(report["expectedFileCount"] as? Int, 1)
+    }
+
+    @MainActor
+    func testTamperedLivePhotoReceiptRefusesCompletion() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let asset = makeAsset(id: 83, filename: "IMG_0083.HEIC", type: .photo)
+        let proof = try makeLivePhotoProof(in: fixture, asset: asset, tamperedReceipt: true)
+        let exporter = PhoneAssetExporter(livePhotoProbeRunner: { _, _, _, _ in .verified(folder: proof.folder) })
+
+        exporter.exportLivePhoto(asset: asset, snapshot: fixture.snapshot, destination: fixture.destination)
+        await waitForCompletion(exporter)
+
+        XCTAssertTrue(exporter.savedAssetIDs.isEmpty)
+        let reportURL = try XCTUnwrap(exporter.outputFolder).appendingPathComponent("import-report.json")
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: reportURL)) as? [String: Any])
+        XCTAssertEqual(report["completed"] as? Bool, false)
+    }
+
+    @MainActor
+    func testInvalidLivePhotoCompletionMarkerRefusesCompletion() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let asset = makeAsset(id: 84, filename: "IMG_0084.HEIC", type: .photo)
+        let proof = try makeLivePhotoProof(in: fixture, asset: asset, verifiedMarker: false)
+        let exporter = PhoneAssetExporter(livePhotoProbeRunner: { _, _, _, _ in .verified(folder: proof.folder) })
+
+        exporter.exportLivePhoto(asset: asset, snapshot: fixture.snapshot, destination: fixture.destination)
+        await waitForCompletion(exporter)
+
+        XCTAssertTrue(exporter.savedAssetIDs.isEmpty)
+        let reportURL = try XCTUnwrap(exporter.outputFolder).appendingPathComponent("import-report.json")
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: reportURL)) as? [String: Any])
+        XCTAssertEqual(report["completed"] as? Bool, false)
+    }
+
+    @MainActor
+    func testLivePhotoRunnerFailureRemainsIncomplete() async throws {
+        let failedFixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: failedFixture.root) }
+        let asset = makeAsset(id: 85, filename: "IMG_0085.HEIC", type: .photo)
+        let failedExporter = PhoneAssetExporter(livePhotoProbeRunner: { _, _, _, _ in
+            .failed(status: "live_photo_candidate_unavailable")
+        })
+        failedExporter.exportLivePhoto(asset: asset, snapshot: failedFixture.snapshot, destination: failedFixture.destination)
+        await waitForCompletion(failedExporter)
+        XCTAssertTrue(failedExporter.savedAssetIDs.isEmpty)
+        let failedReport = try XCTUnwrap(failedExporter.outputFolder).appendingPathComponent("import-report.json")
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(contentsOf: failedReport)) as? [String: Any])?["completed"] as? Bool, false)
+    }
+
+    @MainActor
+    func testLivePhotoRunnerCancellationRemainsIncomplete() async throws {
+        let cancelledFixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: cancelledFixture.root) }
+        let asset = makeAsset(id: 85, filename: "IMG_0085.HEIC", type: .photo)
+        let cancelledExporter = PhoneAssetExporter(livePhotoProbeRunner: { _, _, _, cancellation in
+            while !cancellation.isCancelled { Thread.sleep(forTimeInterval: 0.005) }
+            return .cancelled
+        })
+        cancelledExporter.exportLivePhoto(asset: asset, snapshot: cancelledFixture.snapshot, destination: cancelledFixture.destination)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        cancelledExporter.cancel()
+        await waitForCompletion(cancelledExporter)
+        XCTAssertTrue(cancelledExporter.savedAssetIDs.isEmpty)
+        let cancelledReport = try XCTUnwrap(cancelledExporter.outputFolder).appendingPathComponent("import-report.json")
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(contentsOf: cancelledReport)) as? [String: Any])?["completed"] as? Bool, false)
+    }
+
     func testProbeDeadlineStopsSleepingChild() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -222,6 +342,68 @@ final class PhoneAssetExporterTests: XCTestCase {
         }
         let snapshot = PhoneCatalogSnapshot(assets: [], snapshotDate: Date(), sourceFolder: snapshotFolder)
         return (root, snapshot, destination, cacheRoot)
+    }
+
+    private func makeLivePhotoProof(
+        in fixture: (root: URL, snapshot: PhoneCatalogSnapshot, destination: URL, cacheRoot: URL),
+        asset: PhoneCatalogAsset, missingMovie: Bool = false, tamperedReceipt: Bool = false,
+        verifiedMarker: Bool = true
+    ) throws -> (folder: URL, imageBytes: Data, movieBytes: Data) {
+        let proofRoot = fixture.root.appendingPathComponent(".build/phone-live-photo-proof", isDirectory: true)
+        try FileManager.default.createDirectory(at: proofRoot, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let proofFolder = proofRoot.appendingPathComponent("fixture-proof", isDirectory: true)
+        try FileManager.default.createDirectory(at: proofFolder, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        let imageFolder = fixture.cacheRoot.appendingPathComponent("fixture-image", isDirectory: true)
+        let movieFolder = fixture.cacheRoot.appendingPathComponent("fixture-movie", isDirectory: true)
+        for folder in [imageFolder, movieFolder] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+        }
+        let imageBytes = Data("verified still bytes".utf8)
+        let movieBytes = Data("verified motion bytes".utf8)
+        let imageHash = SHA256.hash(data: imageBytes).map { String(format: "%02x", $0) }.joined()
+        let movieHash = SHA256.hash(data: movieBytes).map { String(format: "%02x", $0) }.joined()
+        try Self.writeJSON(["source": "iphone_afc", "status": "asset_copy_complete",
+                            "declaredBytes": imageBytes.count, "copiedBytes": imageBytes.count,
+                            "stableObserved": true, "receivedStreamSHA256": tamperedReceipt ? String(repeating: "0", count: 64) : imageHash],
+                           to: imageFolder.appendingPathComponent("copy-receipt.json"))
+        try imageBytes.write(to: imageFolder.appendingPathComponent("media.bin"), options: .withoutOverwriting)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: imageFolder.appendingPathComponent("media.bin").path)
+        try Self.writeJSON(["source": "iphone_afc", "status": "asset_copy_complete",
+                            "declaredBytes": movieBytes.count, "copiedBytes": movieBytes.count,
+                            "stableObserved": true, "receivedStreamSHA256": movieHash],
+                           to: movieFolder.appendingPathComponent("copy-receipt.json"))
+        try movieBytes.write(to: movieFolder.appendingPathComponent("media.bin"), options: .withoutOverwriting)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: movieFolder.appendingPathComponent("media.bin").path)
+
+        let suffix = URL(fileURLWithPath: asset.filename).pathExtension
+        let imageName = "still." + suffix
+        let movieName = "motion.MOV"
+        try imageBytes.write(to: proofFolder.appendingPathComponent(imageName), options: .withoutOverwriting)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: proofFolder.appendingPathComponent(imageName).path)
+        if !missingMovie {
+            try movieBytes.write(to: proofFolder.appendingPathComponent(movieName), options: .withoutOverwriting)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: proofFolder.appendingPathComponent(movieName).path)
+        }
+        let stem = URL(fileURLWithPath: asset.filename).deletingPathExtension().lastPathComponent
+        try Self.writeJSON([
+            "sourceSnapshot": fixture.snapshot.sourceFolder.resolvingSymlinksInPath().path,
+            "assetID": asset.id, "imageName": asset.filename, "movieName": stem + ".MOV",
+            "imageResourceBytes": imageBytes.count, "movieResourceBytes": movieBytes.count,
+        ], to: proofFolder.appendingPathComponent("pair-context.json"))
+        try Self.writeJSON([
+            "source": "iphone_afc", "status": "live_photo_pair_verified",
+            "imageBytes": imageBytes.count, "movieBytes": movieBytes.count, "verified": verifiedMarker,
+        ], to: proofFolder.appendingPathComponent("complete.json"))
+        try Self.writeJSON([
+            "imageFile": proofFolder.appendingPathComponent(imageName).path,
+            "movieFile": proofFolder.appendingPathComponent(movieName).path,
+            "imageFolder": imageFolder.path, "movieFolder": movieFolder.path,
+            "proofFolder": proofFolder.path,
+        ], to: proofFolder.appendingPathComponent("verifier-inputs.json"))
+        return (proofFolder, imageBytes, movieBytes)
     }
 
     private func makeAsset(id: Int64, filename: String, type: PhoneCatalogMediaType) -> PhoneCatalogAsset {
