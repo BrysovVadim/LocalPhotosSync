@@ -290,3 +290,20 @@ final class ArchiveProblemFilterTests: XCTestCase {
         XCTAssertFalse(ArchiveHistorySummary.isProblem(nil, last: nil))
     }
 }
+
+final class ArchiveDestinationTests: XCTestCase {
+    func testICloudDriveIsDetectedUnderMobileDocuments() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let drive = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/Фото", isDirectory: true)
+        let local = home.appendingPathComponent("Pictures/Архив", isDirectory: true)
+        try FileManager.default.createDirectory(at: drive, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: local, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        XCTAssertTrue(ArchiveDestination.isInICloudDrive(drive, home: home))
+        XCTAssertTrue(ArchiveDestination.isInICloudDrive(home.appendingPathComponent("Library/Mobile Documents"), home: home))
+        XCTAssertFalse(ArchiveDestination.isInICloudDrive(local, home: home))
+        XCTAssertFalse(ArchiveDestination.isInICloudDrive(home.appendingPathComponent("Library/Mobile DocumentsX"), home: home),
+                       "Only the folder itself and its contents count, not a sibling with the same prefix")
+    }
+}

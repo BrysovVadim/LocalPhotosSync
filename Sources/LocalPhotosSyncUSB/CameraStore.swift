@@ -443,14 +443,8 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         guard ready, !importing, let sourceCamera = camera, sourceCamera.hasOpenSession else { return }
         let batch = items.filter { selected.contains($0.id) }
         guard !batch.isEmpty else { return }
-        let panel = NSOpenPanel()
-        panel.title = "Куда сохранить выбранные файлы?"
-        panel.message = "Для независимого архива выберите папку вне iCloud Drive."
-        panel.prompt = "Выбрать папку"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let parent = panel.url else { return }
+        guard let parent = ArchiveDestination.choose(title: "Куда сохранить выбранные файлы?",
+                                                     prompt: "Выбрать папку") else { return }
         importSelected(to: parent)
     }
 

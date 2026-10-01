@@ -713,15 +713,9 @@ struct PhoneCatalogView: View {
     private func chooseExportFolder(assets: [PhoneCatalogAsset], snapshot: PhoneCatalogSnapshot, livePhoto: Bool = false) {
         guard !assets.isEmpty else { return }
         guard !livePhoto || (assets.count == 1 && assets[0].isTransferable && assets[0].mediaType == .photo) else { return }
-        let panel = NSOpenPanel()
-        panel.title = livePhoto ? "Сохранить Live Photo с iPhone" : "Сохранить доступные файлы с iPhone"
-        panel.message = "Для независимого архива выберите папку вне iCloud Drive."
-        panel.prompt = "Сохранить сюда"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        guard let destination = ArchiveDestination.choose(
+            title: livePhoto ? "Сохранить Live Photo с iPhone" : "Сохранить доступные файлы с iPhone",
+            prompt: "Сохранить сюда") else { return }
         if livePhoto {
             exporter.exportLivePhoto(asset: assets[0], snapshot: snapshot, destination: destination)
         } else {
