@@ -72,6 +72,7 @@ final class PhoneThumbnailLoader: ObservableObject {
     func supersede() {
         guard isLoading else { return }
         generation += 1
+        message = "Загрузка превью прежней страницы остановлена; загруженные превью сохранены."
     }
 
     func canLoad(_ assets: [PhoneCatalogAsset]) -> Bool {

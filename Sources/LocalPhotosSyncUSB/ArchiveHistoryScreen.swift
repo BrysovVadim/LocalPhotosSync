@@ -80,7 +80,7 @@ struct ArchiveHistoryScreen: View {
                 }
             }
             Divider()
-            Text("Проверка сверяет файлы папки с её отчётом import-report.json; телефон для этого не нужен. «Убрать из списка» не удаляет папку с диска. Приложение помнит только пути к папкам.")
+            Text("Проверка сверяет файлы папки с её отчётом import-report.json; телефон для этого не нужен. «Убрать из списка» не удаляет папку с диска. Приложение помнит только пути к папкам и даты их добавления.")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 20)

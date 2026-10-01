@@ -18,12 +18,7 @@ struct LocalPhotosSyncApp: App {
                     .tabItem { Label("Архивы", systemImage: "archivebox") }
             }
             .frame(minWidth: 820, minHeight: 580)
-            .onChange(of: exporter.outputFolder) { _, folder in
-                if let folder { history.record(folder, source: .catalog) }
-            }
-            .onChange(of: store.importing) { _, importing in
-                if !importing, let folder = store.lastArchive { history.record(folder, source: .usbImport) }
-            }
+            .onAppear { history.observe(exporter: exporter, camera: store) }
         }
         .defaultSize(width: 1060, height: 760)
     }

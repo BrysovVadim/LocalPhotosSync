@@ -487,6 +487,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
             } catch {
                 results = "Не удалось записать начальный отчёт: \(error.localizedDescription)"
                 lastImportSucceeded = false
+                lastArchive = nil
                 importing = false
                 return
             }

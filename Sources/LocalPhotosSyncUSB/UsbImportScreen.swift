@@ -356,7 +356,7 @@ struct UsbImportScreen: View {
                 if hasFiles {
                     Text(selectionSummary)
                         .font(.callout.weight(.medium).monospacedDigit())
-                    Button("Снять выбор") { actions.setSelection([]) }
+                    Button("Снять выбор") { actions.setSelection([]); anchor = nil }
                         .disabled(state.selected.isEmpty || state.importing)
                 }
                 Spacer(minLength: 8)

@@ -69,9 +69,9 @@ struct PhoneCatalogView: View {
             }
         }
         .frame(minWidth: 760, minHeight: 540)
-        .onChange(of: category) { _, _ in page = 0; thumbnails.supersede() }
-        .onChange(of: type) { _, _ in page = 0; thumbnails.supersede() }
-        .onChange(of: search) { _, _ in page = 0; thumbnails.supersede() }
+        .onChange(of: category) { _, _ in page = 0; selectionAnchor = nil; thumbnails.supersede() }
+        .onChange(of: type) { _, _ in page = 0; selectionAnchor = nil; thumbnails.supersede() }
+        .onChange(of: search) { _, _ in page = 0; selectionAnchor = nil; thumbnails.supersede() }
         .onChange(of: page) { _, _ in thumbnails.supersede() }
         .onChange(of: reader.snapshot?.sourceFolder) { _, _ in
             page = 0
@@ -359,7 +359,7 @@ struct PhoneCatalogView: View {
                 Text(selectionSummary(actions.selectedCount))
                     .font(.callout.weight(.medium).monospacedDigit())
                     .foregroundStyle(actions.selectedCount > PhoneCatalogActionState.selectionLimit ? Color.orange : Color.primary)
-                Button("Снять выбор") { selected.removeAll() }
+                Button("Снять выбор") { selected.removeAll(); selectionAnchor = nil }
                     .disabled(selected.isEmpty || exporter.isExporting)
                 Spacer(minLength: 8)
                 if exporter.isExporting {

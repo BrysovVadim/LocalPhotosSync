@@ -134,3 +134,39 @@ final class ArchiveHistoryRenderTests: XCTestCase {
         }
     }
 }
+
+final class ArchiveHistoryPersistenceTests: XCTestCase {
+    @MainActor
+    func testUnreadableHistoryIsMovedAsideNotOverwritten() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("archive-history.json")
+        try Data("{ broken".utf8).write(to: file)
+
+        let store = ArchiveHistoryStore(fileURL: file)
+        XCTAssertTrue(store.records.isEmpty)
+        XCTAssertNotNil(store.message)
+        let preserved = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasPrefix("archive-history.unreadable-") }
+        XCTAssertEqual(preserved.count, 1)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(preserved[0])), Data("{ broken".utf8))
+
+        store.record(root, source: .added)
+        XCTAssertEqual(try ArchiveHistoryFile.load(from: file).count, 1, "A fresh list is saved next to the preserved file")
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+
+    func testDedupeResolvesSymlinks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let real = root.appendingPathComponent("real", isDirectory: true)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let link = root.appendingPathComponent("link", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        let records = ArchiveHistoryFile.adding(real, source: .catalog, at: Date(), to: [])
+        XCTAssertEqual(ArchiveHistoryFile.adding(link, source: .added, at: Date(), to: records), records)
+    }
+}

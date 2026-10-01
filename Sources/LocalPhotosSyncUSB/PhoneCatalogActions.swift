@@ -36,13 +36,14 @@ enum PhoneCatalogSelection {
     }
 
     /// Shift-click: adds the transferable assets between `anchor` and `target` (both inclusive, in display order),
-    /// walking from the anchor towards the target until the selection reaches `limit`.
+    /// walking from the clicked target back towards the anchor until the selection reaches `limit`, so the card
+    /// the user just clicked and its neighbours are the ones kept when the range is capped.
     /// Returns nil when either end is not in `assets`, so the caller can fall back to a plain toggle.
     static func addingRange(in assets: [PhoneCatalogAsset], from anchor: Int64, to target: Int64,
                             to selection: Set<Int64>, limit: Int) -> Set<Int64>? {
         guard let start = assets.firstIndex(where: { $0.id == anchor }),
               let end = assets.firstIndex(where: { $0.id == target }) else { return nil }
-        let range = start <= end ? Array(assets[start...end]) : Array(assets[end...start].reversed())
+        let range = end <= start ? Array(assets[end...start]) : Array(assets[start...end].reversed())
         return adding(range, to: selection, limit: limit)
     }
 }
