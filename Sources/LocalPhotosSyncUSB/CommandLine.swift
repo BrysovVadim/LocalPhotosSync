@@ -9,6 +9,7 @@ enum LocalPhotosSyncCLI {
         case verifyArchive(URL)
         case diagnose(seconds: Int)
         case probeImport(parent: URL, seconds: Int)
+        case verifyArchives(history: URL?)
     }
     enum ParseError: Error, Equatable { case message(String) }
     enum DeadlineVerification {
@@ -41,6 +42,13 @@ enum LocalPhotosSyncCLI {
             guard arguments.count == 2, !arguments[1].isEmpty else { return .failure(.message("Usage: LocalPhotosSyncUSB --verify-archive <folder>")) }
             return .success(.verifyArchive(URL(fileURLWithPath: arguments[1], isDirectory: true).standardizedFileURL))
         }
+        if first == "--verify-archives" {
+            if arguments.count == 1 { return .success(.verifyArchives(history: nil)) }
+            guard arguments.count == 3, arguments[1] == "--history", !arguments[2].isEmpty else {
+                return .failure(.message("Usage: LocalPhotosSyncUSB --verify-archives [--history <archive-history.json>]"))
+            }
+            return .success(.verifyArchives(history: URL(fileURLWithPath: arguments[2]).standardizedFileURL))
+        }
         if first == "--diagnose" {
             if arguments.count == 1 { return .success(.diagnose(seconds: 5)) }
             guard arguments.count == 3, arguments[1] == "--seconds",
@@ -71,6 +79,7 @@ enum LocalPhotosSyncCLI {
         Usage:
           LocalPhotosSyncUSB                 Launch the graphical app
           LocalPhotosSyncUSB --verify-archive <folder>
+          LocalPhotosSyncUSB --verify-archives [--history <archive-history.json>]
           LocalPhotosSyncUSB --diagnose [--seconds 0...30]
           LocalPhotosSyncUSB --probe-import <existing-parent-folder> [--seconds 10...120]
           LocalPhotosSyncUSB --help
@@ -86,6 +95,48 @@ enum LocalPhotosSyncCLI {
             let json = (try? encodeJSON(RuntimeError(error: error.localizedDescription))) ?? "{\"error\":\"Verification failed\"}"
             return Outcome(exitCode: 2, stdout: json, stderr: "")
         }
+    }
+
+    private struct ArchivesResult: Encodable {
+        struct Entry: Encodable {
+            let path: String
+            let status: String
+            let verifiedFiles: Int
+            let failures: [String]
+        }
+        let archives: [Entry]
+        let passed: Int
+        let problems: Int
+    }
+
+    /// Checks every archive the app remembers. Read-only: the history file is not updated, so it cannot race the app.
+    static func verifyArchives(historyAt url: URL?) -> Outcome {
+        guard let url = url ?? ArchiveHistoryStore.defaultFileURL() else {
+            return Outcome(exitCode: 2, stdout: "{\"error\":\"History location unavailable\"}", stderr: "")
+        }
+        let records: [ArchiveRecord]
+        do { records = try ArchiveHistoryFile.load(from: url) }
+        catch {
+            let json = (try? encodeJSON(RuntimeError(error: "Archive history is unreadable: \(error.localizedDescription)"))) ?? "{\"error\":\"Archive history is unreadable\"}"
+            return Outcome(exitCode: 2, stdout: json, stderr: "")
+        }
+        let entries = records.map { record -> ArchivesResult.Entry in
+            switch ArchiveHistoryFile.check(folder: record.url) {
+            case .passed(let files, _):
+                return .init(path: record.path, status: "passed", verifiedFiles: files, failures: [])
+            case .failed(let details, _):
+                return .init(path: record.path, status: "failed", verifiedFiles: 0,
+                             failures: details.split(separator: "\n").map(String.init))
+            case .missing:
+                return .init(path: record.path, status: "missing", verifiedFiles: 0, failures: [])
+            case .unchecked, .checking:
+                return .init(path: record.path, status: "unchecked", verifiedFiles: 0, failures: [])
+            }
+        }
+        let passed = entries.filter { $0.status == "passed" }.count
+        let result = ArchivesResult(archives: entries, passed: passed, problems: entries.count - passed)
+        do { return Outcome(exitCode: passed == entries.count ? 0 : 1, stdout: try encodeJSON(result), stderr: "") }
+        catch { return Outcome(exitCode: 2, stdout: "", stderr: error.localizedDescription) }
     }
 
     static func diagnosticResult(_ diagnostics: String) -> Outcome {
@@ -265,6 +316,8 @@ private struct LocalPhotosSyncMain {
             emit(LocalPhotosSyncCLI.diagnosticResult(store.diagnostics()))
         case .success(.probeImport(let parent, let seconds)):
             emit(LocalPhotosSyncCLI.probeImport(parent: parent, seconds: seconds))
+        case .success(.verifyArchives(let history)):
+            emit(LocalPhotosSyncCLI.verifyArchives(historyAt: history))
         }
     }
 

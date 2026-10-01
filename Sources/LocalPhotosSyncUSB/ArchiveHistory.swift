@@ -16,12 +16,47 @@ enum ArchiveSource: String, Codable, Sendable {
     }
 }
 
+/// Outcome of the most recent check, kept across launches. Failure details are not stored: they name photo files.
+struct ArchiveLastCheck: Codable, Equatable, Sendable {
+    enum Outcome: String, Codable, Sendable { case passed, failed, missing }
+    let at: Date
+    let outcome: Outcome
+    let verifiedFiles: Int?
+    let problems: Int?
+
+    init(at: Date, outcome: Outcome, verifiedFiles: Int? = nil, problems: Int? = nil) {
+        self.at = at
+        self.outcome = outcome
+        self.verifiedFiles = verifiedFiles
+        self.problems = problems
+    }
+
+    init?(_ state: ArchiveCheckState) {
+        switch state {
+        case .passed(let files, let date): self.init(at: date, outcome: .passed, verifiedFiles: files)
+        case .failed(let details, let date):
+            self.init(at: date, outcome: .failed, problems: details.split(separator: "\n").count)
+        case .missing(let date): self.init(at: date, outcome: .missing)
+        case .unchecked, .checking: return nil
+        }
+    }
+}
+
 /// An archive folder this app created or the user added. Only the path is remembered; nothing about the phone.
 struct ArchiveRecord: Codable, Identifiable, Equatable, Sendable {
     let id: UUID
     let path: String
     let recordedAt: Date
     let source: ArchiveSource
+    var lastCheck: ArchiveLastCheck?
+
+    init(id: UUID, path: String, recordedAt: Date, source: ArchiveSource, lastCheck: ArchiveLastCheck? = nil) {
+        self.id = id
+        self.path = path
+        self.recordedAt = recordedAt
+        self.source = source
+        self.lastCheck = lastCheck
+    }
 
     var url: URL { URL(fileURLWithPath: path, isDirectory: true) }
     var name: String { url.lastPathComponent }
@@ -34,6 +69,31 @@ enum ArchiveCheckState: Equatable, Sendable {
     case passed(files: Int, at: Date)
     case failed(details: String, at: Date)
     case missing(at: Date)
+}
+
+/// Size of an archive as recorded in its report, read without hashing the files.
+struct ArchiveReportSummary: Equatable, Sendable {
+    let files: Int
+    let bytes: Int64
+    let completed: Bool
+
+    private struct Report: Decodable {
+        struct File: Decodable { let savedBytes: Int64 }
+        struct Companion: Decodable { let bytes: Int64 }
+        let files: [File]?
+        let companionFiles: [Companion]?
+        let completed: Bool?
+    }
+
+    static func read(folder: URL) -> ArchiveReportSummary? {
+        let url = folder.appendingPathComponent("import-report.json")
+        guard let data = try? Data(contentsOf: url), data.count <= 32 * 1024 * 1024,
+              let report = try? JSONDecoder().decode(Report.self, from: data) else { return nil }
+        let files = report.files ?? []
+        let bytes = files.reduce(Int64(0)) { $0 + max(0, $1.savedBytes) } +
+            (report.companionFiles ?? []).reduce(Int64(0)) { $0 + max(0, $1.bytes) }
+        return ArchiveReportSummary(files: files.count, bytes: bytes, completed: report.completed ?? false)
+    }
 }
 
 enum ArchiveHistoryFile {
@@ -100,6 +160,7 @@ final class ArchiveHistoryStore: ObservableObject {
     @Published private(set) var checks: [UUID: ArchiveCheckState]
     @Published private(set) var message: String?
     @Published private(set) var isChecking = false
+    @Published private(set) var summaries: [UUID: ArchiveReportSummary] = [:]
 
     private let fileURL: URL?
     /// Set when an unreadable history file could not be moved aside; saving is then refused to avoid overwriting it.
@@ -168,12 +229,26 @@ final class ArchiveHistoryStore: ObservableObject {
         guard updated != records else { return }
         records = updated
         persist()
+        loadSummaries()
+    }
+
+    /// Reads file counts and sizes from each folder's report in the background; missing folders are skipped.
+    func loadSummaries() {
+        let pending = records.filter { summaries[$0.id] == nil }.map { ($0.id, $0.url) }
+        guard !pending.isEmpty else { return }
+        Task {
+            let loaded = await Task.detached(priority: .utility) {
+                pending.compactMap { id, folder in ArchiveReportSummary.read(folder: folder).map { (id, $0) } }
+            }.value
+            for (id, summary) in loaded where records.contains(where: { $0.id == id }) { summaries[id] = summary }
+        }
     }
 
     /// Removes the entry from the list only; the folder on disk is left untouched.
     func remove(_ id: UUID) {
         records.removeAll { $0.id == id }
         checks.removeValue(forKey: id)
+        summaries.removeValue(forKey: id)
         persist()
     }
 
@@ -210,10 +285,13 @@ final class ArchiveHistoryStore: ObservableObject {
                 let folder = record.url
                 let state = await Task.detached(priority: .utility) { ArchiveHistoryFile.check(folder: folder) }.value
                 // The entry may have been removed from the list while it was being checked.
-                guard records.contains(where: { $0.id == record.id }) else { continue }
+                guard let index = records.firstIndex(where: { $0.id == record.id }) else { continue }
                 checks[record.id] = state
+                records[index].lastCheck = ArchiveLastCheck(state)
+                summaries[record.id] = await Task.detached(priority: .utility) { ArchiveReportSummary.read(folder: folder) }.value
             }
             isChecking = false
+            persist()
         }
     }
 

@@ -170,3 +170,106 @@ final class ArchiveHistoryPersistenceTests: XCTestCase {
         XCTAssertEqual(ArchiveHistoryFile.adding(link, source: .added, at: Date(), to: records), records)
     }
 }
+
+final class ArchiveLastCheckTests: XCTestCase {
+    func testLastCheckIsDerivedWithoutFailureDetails() {
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        XCTAssertEqual(ArchiveLastCheck(.passed(files: 4, at: now)), ArchiveLastCheck(at: now, outcome: .passed, verifiedFiles: 4))
+        XCTAssertEqual(ArchiveLastCheck(.failed(details: "a.heic: x\nb.heic: y", at: now)),
+                       ArchiveLastCheck(at: now, outcome: .failed, problems: 2))
+        XCTAssertEqual(ArchiveLastCheck(.missing(at: now)), ArchiveLastCheck(at: now, outcome: .missing))
+        XCTAssertNil(ArchiveLastCheck(.checking))
+        XCTAssertNil(ArchiveLastCheck(.unchecked))
+    }
+
+    func testOlderHistoryWithoutLastCheckStillLoads() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("archive-history.json")
+        let legacy = """
+        {"version":1,"archives":[{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","path":"/tmp/a","recordedAt":"2026-09-21T12:00:00Z","source":"catalog"}]}
+        """
+        try Data(legacy.utf8).write(to: file)
+        let records = try ArchiveHistoryFile.load(from: file)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertNil(records[0].lastCheck)
+    }
+
+    func testSummaryFallsBackToLastCheck() {
+        let now = Date()
+        let records = [
+            ArchiveRecord(id: UUID(), path: "/a", recordedAt: now, source: .catalog, lastCheck: ArchiveLastCheck(at: now, outcome: .passed)),
+            ArchiveRecord(id: UUID(), path: "/b", recordedAt: now, source: .catalog, lastCheck: ArchiveLastCheck(at: now, outcome: .missing)),
+            ArchiveRecord(id: UUID(), path: "/c", recordedAt: now, source: .catalog),
+        ]
+        let summary = ArchiveHistorySummary(records: records, checks: [records[0].id: .failed(details: "x", at: now)])
+        XCTAssertEqual(summary.passed, 0, "A result from this session overrides the stored one")
+        XCTAssertEqual(summary.problems, 2)
+        XCTAssertEqual(summary.unchecked, 1)
+    }
+
+    func testReportSummaryCountsFilesAndBytes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let media = root.appendingPathComponent("photo.heic")
+        try Data("photo".utf8).write(to: media)
+        let receipt = try FileReceipt.verify(url: media, sourceName: "photo.heic", sourceBytes: 5)
+        try ImportReport(startedAt: Date(), files: [receipt], errors: [], expectedFileCount: 1, completed: true).write(to: root)
+        XCTAssertEqual(ArchiveReportSummary.read(folder: root), ArchiveReportSummary(files: 1, bytes: 5, completed: true))
+        XCTAssertNil(ArchiveReportSummary.read(folder: root.appendingPathComponent("missing")))
+    }
+
+    @MainActor
+    func testVerifyStoresLastCheckInHistoryFile() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        let store = ArchiveHistoryStore(fileURL: file)
+        store.record(root.appendingPathComponent("gone"), source: .added)
+        store.verifyAll()
+        for _ in 0..<200 where store.isChecking { try await Task.sleep(nanoseconds: 10_000_000) }
+        let saved = try ArchiveHistoryFile.load(from: file)
+        XCTAssertEqual(saved.first?.lastCheck?.outcome, .missing)
+    }
+}
+
+final class VerifyArchivesCommandTests: XCTestCase {
+    func testParsesOptionalHistoryPath() {
+        XCTAssertEqual(try LocalPhotosSyncCLI.parse(["--verify-archives"]).get(), .verifyArchives(history: nil))
+        XCTAssertEqual(try LocalPhotosSyncCLI.parse(["--verify-archives", "--history", "/tmp/h.json"]).get(),
+                       .verifyArchives(history: URL(fileURLWithPath: "/tmp/h.json")))
+        guard case .failure = LocalPhotosSyncCLI.parse(["--verify-archives", "--history"]) else { return XCTFail("Missing path") }
+    }
+
+    func testReportsEachArchiveAndExitCode() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let good = root.appendingPathComponent("good", isDirectory: true)
+        try FileManager.default.createDirectory(at: good, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let media = good.appendingPathComponent("photo.heic")
+        try Data("photo".utf8).write(to: media)
+        let receipt = try FileReceipt.verify(url: media, sourceName: "photo.heic", sourceBytes: 5)
+        try ImportReport(startedAt: Date(), files: [receipt], errors: [], expectedFileCount: 1, completed: true).write(to: good)
+        let history = root.appendingPathComponent("history.json")
+
+        var records = ArchiveHistoryFile.adding(good, source: .catalog, at: Date(), to: [])
+        try ArchiveHistoryFile.save(records, to: history)
+        let allGood = LocalPhotosSyncCLI.verifyArchives(historyAt: history)
+        XCTAssertEqual(allGood.exitCode, 0)
+        XCTAssertTrue(allGood.stdout.contains("\"passed\""), allGood.stdout)
+
+        records = ArchiveHistoryFile.adding(root.appendingPathComponent("gone"), source: .added, at: Date(), to: records)
+        try ArchiveHistoryFile.save(records, to: history)
+        let before = try Data(contentsOf: history)
+        let withMissing = LocalPhotosSyncCLI.verifyArchives(historyAt: history)
+        XCTAssertEqual(withMissing.exitCode, 1)
+        XCTAssertTrue(withMissing.stdout.contains("\"missing\""), withMissing.stdout)
+        XCTAssertEqual(try Data(contentsOf: history), before, "The command does not modify the history")
+
+        try Data("broken".utf8).write(to: history)
+        XCTAssertEqual(LocalPhotosSyncCLI.verifyArchives(historyAt: history).exitCode, 2)
+    }
+}

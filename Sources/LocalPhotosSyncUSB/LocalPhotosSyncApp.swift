@@ -8,23 +8,41 @@ struct LocalPhotosSyncApp: App {
 
     var body: some Scene {
         WindowGroup("Фото с iPhone") {
-            TabView {
-                PhoneCatalogView(exporter: exporter)
-                    .disabled(store.importing)
-                    .tabItem { Label("Каталог iPhone", systemImage: "iphone") }
-                LibraryView(store: store)
-                    .disabled(exporter.isExporting)
-                    .tabItem { Label("Импорт по USB", systemImage: "cable.connector") }
-                ArchiveHistoryView(history: history)
-                    .tabItem { Label("Архивы", systemImage: "archivebox") }
-            }
-            .frame(minWidth: 820, minHeight: 580)
-            .onAppear {
-                history.observe(exporter: exporter, camera: store)
-                attention.observe(exporter: exporter, camera: store)
-            }
+            MainWindow(store: store, exporter: exporter, history: history)
+                .onAppear {
+                    history.observe(exporter: exporter, camera: store)
+                    attention.observe(exporter: exporter, camera: store)
+                }
         }
         .defaultSize(width: 1060, height: 760)
+    }
+}
+
+enum MainTab: String {
+    case catalog, usbImport, archives
+}
+
+private struct MainWindow: View {
+    @ObservedObject var store: CameraStore
+    @ObservedObject var exporter: PhoneAssetExporter
+    @ObservedObject var history: ArchiveHistoryStore
+    @SceneStorage("mainTab") private var tab = MainTab.catalog.rawValue
+
+    var body: some View {
+        TabView(selection: $tab) {
+            PhoneCatalogView(exporter: exporter)
+                .disabled(store.importing)
+                .tabItem { Label("Каталог iPhone", systemImage: "iphone") }
+                .tag(MainTab.catalog.rawValue)
+            LibraryView(store: store)
+                .disabled(exporter.isExporting)
+                .tabItem { Label("Импорт по USB", systemImage: "cable.connector") }
+                .tag(MainTab.usbImport.rawValue)
+            ArchiveHistoryView(history: history)
+                .tabItem { Label("Архивы", systemImage: "archivebox") }
+                .tag(MainTab.archives.rawValue)
+        }
+        .frame(minWidth: 820, minHeight: 580)
     }
 }
 
@@ -88,11 +106,13 @@ private struct ArchiveHistoryView: View {
             checks: history.checks,
             isChecking: history.isChecking,
             message: history.message,
+            summaries: history.summaries,
             actions: ArchiveHistoryActions(
                 verifyAll: { history.verifyAll() },
                 verify: { history.verify([$0]) },
                 addFolder: { history.addExistingFolder() },
                 reveal: { NSWorkspace.shared.activateFileViewerSelecting([$0]) },
                 remove: { history.remove($0) }))
+        .onAppear { history.loadSummaries() }
     }
 }

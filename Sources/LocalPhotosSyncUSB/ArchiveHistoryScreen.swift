@@ -22,7 +22,13 @@ struct ArchiveHistorySummary: Equatable {
             switch checks[record.id] ?? .unchecked {
             case .passed: passed += 1
             case .failed, .missing: problems += 1
-            case .unchecked, .checking: unchecked += 1
+            case .checking: unchecked += 1
+            case .unchecked:
+                switch record.lastCheck?.outcome {
+                case .passed: passed += 1
+                case .failed, .missing: problems += 1
+                case nil: unchecked += 1
+                }
             }
         }
         self.passed = passed
@@ -36,12 +42,14 @@ struct ArchiveHistoryScreen: View {
     let checks: [UUID: ArchiveCheckState]
     let isChecking: Bool
     let message: String?
+    let summaries: [UUID: ArchiveReportSummary]
     let actions: ArchiveHistoryActions
 
     init(records: [ArchiveRecord], checks: [UUID: ArchiveCheckState], isChecking: Bool, message: String?,
-         actions: ArchiveHistoryActions) {
+         summaries: [UUID: ArchiveReportSummary] = [:], actions: ArchiveHistoryActions) {
         self.records = records
         self.checks = checks
+        self.summaries = summaries
         self.isChecking = isChecking
         self.message = message
         self.actions = actions
@@ -142,16 +150,20 @@ struct ArchiveHistoryScreen: View {
         let state = checks[record.id] ?? .unchecked
         let missing: Bool = { if case .missing = state { return true } else { return false } }()
         return HStack(alignment: .top, spacing: 12) {
-            stateIcon(state)
+            stateIcon(state, last: record.lastCheck)
                 .font(.title3)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 3) {
                 Text(record.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
                 Text(record.parentPath).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     .textSelection(.enabled)
-                Text("\(record.source.label) · добавлена \(record.recordedAt.formatted(date: .abbreviated, time: .shortened))")
+                Text(rowDetails(record))
                     .font(.caption).foregroundStyle(.secondary)
-                stateDetail(state)
+                if case .unchecked = state, let last = record.lastCheck {
+                    lastCheckDetail(last)
+                } else {
+                    stateDetail(state)
+                }
             }
             Spacer(minLength: 8)
             Button("Проверить") { actions.verify(record.id) }
@@ -175,11 +187,43 @@ struct ArchiveHistoryScreen: View {
         .padding(.vertical, 10)
     }
 
+    private func rowDetails(_ record: ArchiveRecord) -> String {
+        var parts = [record.source.label, "добавлена \(record.recordedAt.formatted(date: .abbreviated, time: .shortened))"]
+        if let summary = summaries[record.id] {
+            parts.append("файлов: \(summary.files), \(ByteCountFormatter.string(fromByteCount: summary.bytes, countStyle: .file))")
+            if !summary.completed { parts.append("отчёт не завершён") }
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func lastCheckDetail(_ last: ArchiveLastCheck) -> some View {
+        let when = last.at.formatted(.relative(presentation: .named))
+        let text: String
+        let color: Color
+        switch last.outcome {
+        case .passed:
+            text = "Последняя проверка \(when): в порядке" + (last.verifiedFiles.map { ", файлов: \($0)" } ?? "")
+            color = .green
+        case .failed:
+            text = "Последняя проверка \(when): расхождения" + (last.problems.map { " (\($0))" } ?? "") + ". Проверьте снова, чтобы увидеть подробности."
+            color = .orange
+        case .missing:
+            text = "Последняя проверка \(when): папка не найдена"
+            color = .red
+        }
+        return Text(text).font(.caption).foregroundStyle(color.opacity(0.85))
+    }
+
     @ViewBuilder
-    private func stateIcon(_ state: ArchiveCheckState) -> some View {
+    private func stateIcon(_ state: ArchiveCheckState, last: ArchiveLastCheck? = nil) -> some View {
         switch state {
         case .unchecked:
-            Image(systemName: "circle.dashed").foregroundStyle(.secondary)
+            switch last?.outcome {
+            case .passed: Image(systemName: "checkmark.seal").foregroundStyle(.green)
+            case .failed: Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+            case .missing: Image(systemName: "questionmark.folder").foregroundStyle(.red)
+            case nil: Image(systemName: "circle.dashed").foregroundStyle(.secondary)
+            }
         case .checking:
             ProgressView().controlSize(.small)
         case .passed:
