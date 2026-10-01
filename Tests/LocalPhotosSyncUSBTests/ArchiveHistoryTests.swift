@@ -350,7 +350,7 @@ final class ArchiveAddAndTotalsTests: XCTestCase {
         XCTAssertEqual(store.add([archive, other]), 1)
         XCTAssertEqual(store.records.map(\.name), ["archive"])
         XCTAssertTrue(store.message?.contains("photos") == true)
-        XCTAssertEqual(store.add([archive]), 1, "Adding again keeps one entry")
+        XCTAssertEqual(store.add([archive]), 0, "Adding again keeps one entry and reports nothing new")
         XCTAssertEqual(store.records.count, 1)
         XCTAssertNil(store.message)
     }
@@ -366,5 +366,46 @@ final class ArchiveAddAndTotalsTests: XCTestCase {
         let line = ArchiveHistoryScreen.totalsLine(records: records, summaries: summaries)
         XCTAssertTrue(line.contains("Всего файлов: 5"), line)
         XCTAssertTrue(line.contains("2 из 3"), line)
+    }
+}
+
+final class ArchiveQueueAndMessageTests: XCTestCase {
+    @MainActor
+    func testFoldersAddedDuringACheckAreCheckedAfterwards() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = root.appendingPathComponent("first", isDirectory: true)
+        let second = root.appendingPathComponent("second", isDirectory: true)
+        for folder in [first, second] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            try ImportReport(startedAt: Date(), files: [], errors: [], expectedFileCount: 0, completed: true).write(to: folder)
+        }
+        let store = ArchiveHistoryStore(fileURL: nil)
+        store.add([first])
+        XCTAssertTrue(store.isChecking)
+        store.add([second])
+        for _ in 0..<300 where store.isChecking { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(store.records.count, 2)
+        for record in store.records {
+            if case .checking = store.checks[record.id] { XCTFail("\(record.name) was left unchecked") }
+            XCTAssertNotNil(store.checks[record.id], record.name)
+        }
+    }
+
+    @MainActor
+    func testSuccessfulAddKeepsUnrelatedWarnings() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false) // unreadable as a file
+        let store = ArchiveHistoryStore(fileURL: file)
+        let warning = try XCTUnwrap(store.message)
+        let archive = root.appendingPathComponent("archive", isDirectory: true)
+        try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: false)
+        try ImportReport(startedAt: Date(), files: [], errors: [], expectedFileCount: 0, completed: true).write(to: archive)
+        store.add([archive])
+        XCTAssertNotNil(store.message, "A warning about the history file must survive a successful add (was: \(warning))")
     }
 }

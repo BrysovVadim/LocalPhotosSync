@@ -58,4 +58,5 @@ else
     print -u2 -r -- "Could not publish staged app; staged bundle preserved at: $staging_app"
     exit 1
 fi
+rmdir "$staging_root" 2>/dev/null || true
 print -r -- "$app_dir"

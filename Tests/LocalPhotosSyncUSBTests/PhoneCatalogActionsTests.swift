@@ -169,7 +169,7 @@ final class PhoneCatalogCSVTests: XCTestCase {
             PhoneCatalogAsset(id: 3, filename: "=cmd()", createdAt: nil, mediaType: .other,
                               scope: .unknown, isHidden: false, visibilityState: 0),
         ]
-        let checks = [1: PhoneAssetAvailabilityCheck(state: .mainFileReadable(bytes: 42), sourceFolder: folder, checkedAt: Date())]
+        let checks: [Int64: PhoneAssetAvailabilityCheck] = [1: PhoneAssetAvailabilityCheck(state: .mainFileReadable(bytes: 42), sourceFolder: folder, checkedAt: Date())]
         let csv = PhoneCatalogCSV.make(assets: assets, checks: checks, saved: [1], failed: [2])
         let lines = csv.components(separatedBy: "\r\n")
         XCTAssertEqual(lines[0], PhoneCatalogCSV.header.joined(separator: ","))

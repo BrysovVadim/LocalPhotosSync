@@ -117,7 +117,9 @@ struct ArchiveHistoryScreen: View {
         }
         .frame(minWidth: 760, minHeight: 540)
         .dropDestination(for: URL.self) { urls, _ in
-            let folders = urls.filter { $0.hasDirectoryPath || (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            let folders = urls.filter {
+                $0.isFileURL && ($0.hasDirectoryPath || (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true)
+            }
             guard !folders.isEmpty else { return false }
             actions.addDropped(folders)
             return true

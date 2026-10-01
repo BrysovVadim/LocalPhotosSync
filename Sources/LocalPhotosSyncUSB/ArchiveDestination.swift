@@ -20,6 +20,7 @@ enum ArchiveDestination {
     /// Shows a folder picker starting at the last used folder. Returns nil if the user cancels.
     @MainActor
     static func choose(title: String, prompt: String, defaults: UserDefaults = .standard) -> URL? {
+        var reopenAt: URL?
         while true {
             let panel = NSOpenPanel()
             panel.title = title
@@ -29,11 +30,16 @@ enum ArchiveDestination {
             panel.canChooseFiles = false
             panel.canCreateDirectories = true
             panel.allowsMultipleSelection = false
-            if let last = defaults.string(forKey: lastFolderKey), FileManager.default.fileExists(atPath: last) {
+            if let reopenAt {
+                panel.directoryURL = reopenAt
+            } else if let last = defaults.string(forKey: lastFolderKey), FileManager.default.fileExists(atPath: last) {
                 panel.directoryURL = URL(fileURLWithPath: last, isDirectory: true)
             }
             guard panel.runModal() == .OK, let folder = panel.url else { return nil }
-            if isInICloudDrive(folder) && !confirmICloudDrive(folder) { continue }
+            if isInICloudDrive(folder) && !confirmICloudDrive(folder) {
+                reopenAt = folder.deletingLastPathComponent()
+                continue
+            }
             defaults.set(folder.path, forKey: lastFolderKey)
             return folder
         }

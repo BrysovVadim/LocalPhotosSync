@@ -166,6 +166,9 @@ final class ArchiveHistoryStore: ObservableObject {
     /// Set when an unreadable history file could not be moved aside; saving is then refused to avoid overwriting it.
     private var persistenceBlocked = false
     private var subscriptions: Set<AnyCancellable> = []
+    private var pendingVerification: Set<UUID> = []
+    private var lastRejection: String?
+    private var didRunLaunchCheck = false
 
     /// `fileURL == nil` keeps the history in memory only.
     init(fileURL: URL? = ArchiveHistoryStore.defaultFileURL()) {
@@ -266,24 +269,30 @@ final class ArchiveHistoryStore: ObservableObject {
         add([folder])
     }
 
-    /// Adds transfer folders (from the picker or dropped from Finder) and checks the new ones.
-    /// Folders without `import-report.json` are skipped with a message.
+    /// Adds transfer folders (from the picker or dropped from Finder) and checks them.
+    /// Folders without `import-report.json` are skipped with a message. Returns how many were new to the list.
     @discardableResult
     func add(_ folders: [URL]) -> Int {
-        var added: [UUID] = []
+        let before = Set(records.map(\.id))
+        var toCheck: [UUID] = []
         var rejected: [String] = []
+        if message != nil && message == lastRejection { message = nil }
+        lastRejection = nil
         for folder in folders {
             guard FileManager.default.fileExists(atPath: folder.appendingPathComponent("import-report.json").path) else {
                 rejected.append(folder.lastPathComponent)
                 continue
             }
             record(folder, source: .added)
-            if let id = records.first(where: { ArchiveHistoryFile.samePath($0.url, folder) })?.id { added.append(id) }
+            if let id = records.first(where: { ArchiveHistoryFile.samePath($0.url, folder) })?.id { toCheck.append(id) }
         }
-        message = rejected.isEmpty ? nil :
-            "Не добавлено, нет import-report.json: \(rejected.joined(separator: ", ")). Это не папки переноса."
-        if !added.isEmpty { verify(added) }
-        return added.count
+        if !rejected.isEmpty {
+            let text = "Не добавлено, нет import-report.json: \(rejected.joined(separator: ", ")). Это не папки переноса."
+            lastRejection = text
+            message = text
+        }
+        if !toCheck.isEmpty { verify(toCheck) }
+        return Set(records.map(\.id)).subtracting(before).count
     }
 
     func verifyAll() { verify(records.map(\.id)) }
@@ -299,8 +308,22 @@ final class ArchiveHistoryStore: ObservableObject {
         verify(Self.staleIDs(in: records, olderThanDays: days))
     }
 
+    /// Runs the optional launch-time check once per app run, not for every new window.
+    func runLaunchCheckIfEnabled(defaults: UserDefaults = .standard) {
+        guard !didRunLaunchCheck else { return }
+        didRunLaunchCheck = true
+        guard defaults.bool(forKey: SettingsKeys.autoVerifyArchives) else { return }
+        let days = defaults.integer(forKey: SettingsKeys.autoVerifyDays)
+        verifyStale(olderThanDays: days > 0 ? days : 7)
+    }
+
     func verify(_ ids: [UUID]) {
-        guard !isChecking else { return }
+        // A check already running picks these up when it finishes, so dropped folders are never left unchecked.
+        guard !isChecking else {
+            pendingVerification.formUnion(ids)
+            for id in ids where records.contains(where: { $0.id == id }) { checks[id] = .checking }
+            return
+        }
         let targets = records.filter { ids.contains($0.id) }
         guard !targets.isEmpty else { return }
         isChecking = true
@@ -317,6 +340,11 @@ final class ArchiveHistoryStore: ObservableObject {
                 summaries[record.id] = await Task.detached(priority: .utility) { ArchiveReportSummary.read(folder: folder) }.value
             }
             isChecking = false
+            if !pendingVerification.isEmpty {
+                let next = Array(pendingVerification)
+                pendingVerification.removeAll()
+                verify(next)
+            }
         }
     }
 
