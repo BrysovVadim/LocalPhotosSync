@@ -70,7 +70,7 @@ struct UsbImportActions {
     var cancelImport: () -> Void = {}
     var verifyArchive: () -> Void = {}
     var openArchive: (URL) -> Void = { _ in }
-    var thumbnail: (String) async -> NSImage? = { _ in nil }
+    var thumbnail: @MainActor (String) async -> NSImage? = { _ in nil }
 }
 
 struct UsbImportScreen: View {
@@ -372,7 +372,7 @@ private struct UsbImportTile: View {
     let item: UsbImportItem
     let selected: Bool
     let ready: Bool
-    let thumbnail: (String) async -> NSImage?
+    let thumbnail: @MainActor (String) async -> NSImage?
     let toggle: () -> Void
     @State private var image: NSImage?
 
