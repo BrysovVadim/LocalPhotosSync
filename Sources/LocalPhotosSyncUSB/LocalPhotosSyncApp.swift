@@ -2,13 +2,16 @@ import SwiftUI
 
 struct LocalPhotosSyncApp: App {
     @StateObject private var store = CameraStore()
+    @StateObject private var exporter = PhoneAssetExporter()
 
     var body: some Scene {
         WindowGroup("Фото с iPhone") {
             TabView {
-                PhoneCatalogView()
+                PhoneCatalogView(exporter: exporter)
+                    .disabled(store.importing)
                     .tabItem { Label("Каталог iPhone", systemImage: "iphone") }
                 LibraryView(store: store)
+                    .disabled(exporter.isExporting)
                     .tabItem { Label("Импорт по USB", systemImage: "cable.connector") }
             }
             .frame(minWidth: 820, minHeight: 580)

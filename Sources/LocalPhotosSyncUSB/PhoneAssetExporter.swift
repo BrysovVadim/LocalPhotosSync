@@ -1,0 +1,622 @@
+import Combine
+import CryptoKit
+import CoreFoundation
+import Darwin
+import Foundation
+
+enum PhoneAssetCopyProbeResult: Sendable {
+    case copied(folder: URL, bytes: Int64, stableObserved: Bool)
+    case failed(status: String)
+    case timedOut
+    case cancelled
+}
+
+final class PhoneAssetExportCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+}
+
+private struct PhoneAssetExportOutcome: Sendable {
+    let folder: URL?
+    let exported: Int
+    let failed: Int
+    let savedAssetIDs: Set<Int64>
+    let failedAssetIDs: Set<Int64>
+    let message: String
+}
+
+private enum PhoneAssetExportError: Error {
+    case invalidSnapshot
+    case unsafeFilename
+    case invalidReceipt
+    case unavailable
+    case tooLarge
+    case changed
+    case copyFailed
+    case cancelled
+    case timedOut
+}
+
+@MainActor
+final class PhoneAssetExporter: ObservableObject {
+    typealias ProbeRunner = @Sendable (Int64, URL, TimeInterval, PhoneAssetExportCancellation) -> PhoneAssetCopyProbeResult
+
+    nonisolated static let processGroupLauncherSource = """
+    import os,sys,signal
+    child=[None]
+    args=[sys.executable]+sys.argv[1:]
+    def stop(sig,frame):
+     if child[0] is not None:
+      try: os.killpg(child[0],sig)
+      except OSError:
+       try: os.kill(child[0],sig)
+       except OSError: pass
+     raise SystemExit(128+sig)
+    signal.signal(signal.SIGTERM,stop)
+    pid=os.fork()
+    child[0]=pid
+    if pid==0:
+     signal.signal(signal.SIGTERM,signal.SIG_DFL)
+     os.setsid()
+     os.write(1,("READY:%d\\n"%os.getpid()).encode())
+     os.execv(sys.executable,args)
+    _,status=os.waitpid(pid,0)
+    os._exit(os.waitstatus_to_exitcode(status))
+    """
+
+    @Published private(set) var isExporting = false
+    @Published private(set) var message: String?
+    @Published private(set) var outputFolder: URL?
+    @Published private(set) var exportedCount = 0
+    @Published private(set) var failedCount = 0
+    @Published private(set) var savedAssetIDs: Set<Int64> = []
+    @Published private(set) var failedAssetIDs: Set<Int64> = []
+    @Published private(set) var sourceFolder: URL?
+
+    private let probeRunner: ProbeRunner
+    private var activeCancellation: PhoneAssetExportCancellation?
+
+    init(probeRunner: @escaping ProbeRunner = { assetID, snapshotFolder, timeout, cancellation in
+        PhoneAssetExporter.runProbe(assetID, snapshotFolder, timeout, cancellation)
+    }) {
+        self.probeRunner = probeRunner
+    }
+
+    func cancel() {
+        activeCancellation?.cancel()
+    }
+
+    func export(assets: [PhoneCatalogAsset], snapshot: PhoneCatalogSnapshot, destination: URL) {
+        guard !isExporting else { return }
+        guard !assets.isEmpty, assets.count <= 12,
+              Set(assets.map(\.id)).count == assets.count,
+              assets.allSatisfy({ $0.id > 0 && $0.isVisibleLibraryItem && ($0.mediaType == .photo || $0.mediaType == .video) && Self.safeFilename($0.filename) }) else {
+            outputFolder = nil
+            exportedCount = 0
+            failedCount = assets.count
+            savedAssetIDs = []
+            failedAssetIDs = []
+            sourceFolder = snapshot.sourceFolder
+            failedAssetIDs = Set(assets.map(\.id))
+            message = "Выберите до 12 видимых фото или видео из медиатеки."
+            return
+        }
+        isExporting = true
+        outputFolder = nil
+        exportedCount = 0
+        failedCount = 0
+        savedAssetIDs = []
+        failedAssetIDs = []
+        sourceFolder = snapshot.sourceFolder
+        message = "Сохраняем доступные файлы: 0 из \(assets.count)…"
+        let cancellation = PhoneAssetExportCancellation()
+        activeCancellation = cancellation
+        let runner = probeRunner
+        Task { [self] in
+            let result = await withTaskCancellationHandler {
+                await Task.detached(priority: .userInitiated) {
+                    Self.performExport(assets: assets, snapshotFolder: snapshot.sourceFolder,
+                                       destination: destination, runner: runner, cancellation: cancellation)
+                }.value
+            } onCancel: {
+                cancellation.cancel()
+            }
+            outputFolder = result.folder
+            exportedCount = result.exported
+            failedCount = result.failed
+            savedAssetIDs = result.savedAssetIDs
+            failedAssetIDs = result.failedAssetIDs
+            message = result.message
+            activeCancellation = nil
+            isExporting = false
+        }
+    }
+
+    nonisolated private static func performExport(
+        assets: [PhoneCatalogAsset], snapshotFolder: URL, destination: URL,
+        runner: @escaping ProbeRunner, cancellation: PhoneAssetExportCancellation
+    ) -> PhoneAssetExportOutcome {
+        guard let repository = repositoryRoot(for: snapshotFolder),
+              isDirectoryWithoutSymlink(destination) else {
+            return PhoneAssetExportOutcome(folder: nil, exported: 0, failed: assets.count,
+                                           savedAssetIDs: [], failedAssetIDs: Set(assets.map(\.id)),
+                                           message: "Не удалось проверить каталог телефона или папку сохранения.")
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 240
+        let runFolder = destination.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: runFolder, withIntermediateDirectories: false)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: runFolder.path)
+            guard isPrivateDirectory(runFolder) else { throw PhoneAssetExportError.copyFailed }
+        } catch {
+            return PhoneAssetExportOutcome(folder: nil, exported: 0, failed: assets.count,
+                                           savedAssetIDs: [], failedAssetIDs: Set(assets.map(\.id)),
+                                           message: "Не удалось создать закрытую папку экспорта.")
+        }
+
+        let startedAt = Date()
+        let reportURL = runFolder.appendingPathComponent("import-report.json")
+        var receipts: [FileReceipt] = []
+        var savedIDs: Set<Int64> = []
+        var pendingSavedIDs: Set<Int64> = []
+        var errors: [String] = []
+        do { try writeReport(startedAt: startedAt, files: receipts, errors: errors, expected: assets.count, completed: false, to: runFolder) }
+        catch {
+            return PhoneAssetExportOutcome(folder: runFolder, exported: 0, failed: assets.count,
+                                           savedAssetIDs: [], failedAssetIDs: Set(assets.map(\.id)),
+                                           message: "Не удалось создать начальный отчёт; экспорт остановлен.")
+        }
+
+        for (offset, asset) in assets.enumerated() {
+            let index = offset + 1
+            var stopAfterCheckpoint = false
+            if cancellation.isCancelled {
+                errors.append("Файл \(index): экспорт отменён; оставшиеся файлы не обрабатывались.")
+                break
+            }
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else {
+                errors.append("Файл \(index): достигнут общий лимит времени экспорта.")
+                break
+            }
+            do {
+                let itemFolder = runFolder.appendingPathComponent(String(format: "%05d", index), isDirectory: true)
+                try FileManager.default.createDirectory(at: itemFolder, withIntermediateDirectories: false)
+                try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: itemFolder.path)
+                let probe = runner(asset.id, snapshotFolder, min(75, remaining), cancellation)
+                if cancellation.isCancelled {
+                    errors.append("Файл \(index): экспорт отменён; оставшиеся файлы не обрабатывались.")
+                    stopAfterCheckpoint = true
+                } else { switch probe {
+                case .copied(let cacheFolder, let bytes, let stableObserved):
+                    guard stableObserved else { throw PhoneAssetExportError.changed }
+                    guard bytes > 0, bytes <= 32 * 1024 * 1024 else { throw PhoneAssetExportError.tooLarge }
+                    try ensureActive(cancellation, deadline: deadline)
+                    let verified = try verifyCacheCopy(cacheFolder, asset: asset, snapshotFolder: snapshotFolder,
+                                                       repository: repository, expectedBytes: bytes,
+                                                       cancellation: cancellation, deadline: deadline)
+                    try copyRegularFile(verified.media, to: itemFolder.appendingPathComponent(asset.filename),
+                                        expectedBytes: bytes, cancellation: cancellation, deadline: deadline)
+                    try copyRegularFile(verified.receipt, to: itemFolder.appendingPathComponent("phone-asset-receipt.json"),
+                                        expectedBytes: verified.receiptBytes, cancellation: cancellation, deadline: deadline)
+                    let savedURL = itemFolder.appendingPathComponent(asset.filename)
+                    try ensureActive(cancellation, deadline: deadline)
+                    let receipt = try FileReceipt.verify(url: savedURL, sourceName: asset.filename, sourceBytes: bytes)
+                    try ensureActive(cancellation, deadline: deadline)
+                    guard receipt.sha256 == verified.receivedStreamSHA256,
+                          let copiedReceipt = receipt.companions.first(where: { $0.filename == "phone-asset-receipt.json" }),
+                          copiedReceipt.bytes == verified.receiptBytes,
+                          copiedReceipt.sha256 == verified.receiptSHA256 else { throw PhoneAssetExportError.invalidReceipt }
+                    receipts.append(receipt)
+                    pendingSavedIDs.insert(asset.id)
+                case .failed(let status):
+                    throw errorForProbeStatus(status)
+                case .timedOut:
+                    throw PhoneAssetExportError.copyFailed
+                case .cancelled:
+                    cancellation.cancel()
+                    errors.append("Файл \(index): экспорт отменён; оставшиеся файлы не обрабатывались.")
+                    stopAfterCheckpoint = true
+                }
+                }
+            } catch {
+                errors.append(errorMessage(error, index: index))
+            }
+            if cancellation.isCancelled && !stopAfterCheckpoint {
+                errors.append("Файл \(index): экспорт отменён; оставшиеся файлы не обрабатывались.")
+                stopAfterCheckpoint = true
+            }
+            do { try writeReport(startedAt: startedAt, files: receipts, errors: errors, expected: assets.count, completed: false, to: runFolder) }
+            catch {
+                errors.append("Файл \(index): не удалось сохранить промежуточный отчёт.")
+                break
+            }
+            savedIDs.formUnion(pendingSavedIDs)
+            pendingSavedIDs.removeAll()
+            if stopAfterCheckpoint { break }
+        }
+
+        do { try writeReport(startedAt: startedAt, files: receipts, errors: errors, expected: assets.count, completed: false, to: runFolder) }
+        catch { errors.append("Не удалось сохранить итоговый промежуточный отчёт.") }
+        let allCopied = savedIDs.count == assets.count && errors.isEmpty && !cancellation.isCancelled
+        var verificationIsComplete = false
+        if allCopied {
+            do {
+                try ensureActive(cancellation, deadline: deadline)
+                try writeReport(startedAt: startedAt, files: receipts, errors: [], expected: assets.count, completed: true, to: runFolder)
+                let verification = try ArchiveVerification.verify(reportAt: reportURL)
+                if !cancellation.isCancelled && ProcessInfo.processInfo.systemUptime < deadline &&
+                    verification.isValid && verification.verifiedFiles == assets.count {
+                    verificationIsComplete = true
+                } else {
+                    errors.append(cancellation.isCancelled ? "Экспорт отменён до завершения проверки архива." :
+                                  (ProcessInfo.processInfo.systemUptime >= deadline ? "Достигнут общий лимит времени экспорта." :
+                                   "Итоговая проверка архива не прошла."))
+                    try? writeReport(startedAt: startedAt, files: receipts, errors: errors, expected: assets.count, completed: false, to: runFolder)
+                }
+            } catch {
+                errors.append("Не удалось завершить проверку архива.")
+                try? writeReport(startedAt: startedAt, files: receipts, errors: errors, expected: assets.count, completed: false, to: runFolder)
+            }
+        }
+        let failed = assets.count - savedIDs.count
+        let finalMessage = verificationIsComplete
+            ? "Экспорт доступных файлов завершён: \(savedIDs.count) из \(assets.count). Полнота оригиналов не подтверждена."
+            : "Экспорт доступных файлов сохранён частично: \(savedIDs.count) из \(assets.count). Ошибок: \(max(failed, errors.count))."
+        return PhoneAssetExportOutcome(folder: runFolder, exported: savedIDs.count, failed: failed,
+                                       savedAssetIDs: savedIDs, failedAssetIDs: Set(assets.map(\.id)).subtracting(savedIDs),
+                                       message: finalMessage)
+    }
+
+    nonisolated private static func verifyCacheCopy(
+        _ folder: URL, asset: PhoneCatalogAsset, snapshotFolder: URL, repository: URL, expectedBytes: Int64,
+        cancellation: PhoneAssetExportCancellation, deadline: TimeInterval
+    ) throws -> (media: URL, receipt: URL, receiptBytes: Int64, receiptSHA256: String, receivedStreamSHA256: String) {
+        let cacheRoot = repository.appendingPathComponent(".build/phone-asset-copy-probe", isDirectory: true)
+        guard isContained(folder, in: cacheRoot), isPrivateDirectory(folder) else { throw PhoneAssetExportError.invalidReceipt }
+        let media = folder.appendingPathComponent("media.bin")
+        let cReceipt = folder.appendingPathComponent("copy-receipt.json")
+        let receipt = folder.appendingPathComponent("asset-copy-receipt.json")
+        guard isRegularPrivateFile(media), isRegularPrivateFile(cReceipt), isRegularPrivateFile(receipt),
+              fileSize(media) == expectedBytes, expectedBytes > 0, expectedBytes <= 32 * 1024 * 1024 else {
+            throw PhoneAssetExportError.invalidReceipt
+        }
+        try ensureActive(cancellation, deadline: deadline)
+        let receiptData = try readPrivateData(receipt, limit: 64 * 1024)
+        guard receiptData.count <= 64 * 1024,
+              let value = try JSONSerialization.jsonObject(with: receiptData) as? [String: Any],
+              Set(value.keys) == Set([
+                "source", "status", "sourceSnapshot", "assetID", "filename", "ZKIND",
+                "ZORIGINALFILESIZE", "ZORIGINALRESOURCECHOICE", "linkedResources", "declaredBytes",
+                "copiedBytes", "stableObserved", "receivedStreamSHA256",
+              ]),
+              value["source"] as? String == "iphone_afc", value["status"] as? String == "asset_copy_complete",
+              value["sourceSnapshot"] as? String == snapshotFolder.resolvingSymlinksInPath().path,
+              integer(value["assetID"]) == asset.id, value["filename"] as? String == asset.filename,
+              integer(value["ZKIND"]) == (asset.mediaType == .photo ? 0 : 1),
+              isNullableInteger(value["ZORIGINALFILESIZE"]), isNullableInteger(value["ZORIGINALRESOURCECHOICE"]),
+              validLinkedResources(value["linkedResources"]),
+              integer(value["declaredBytes"]) == expectedBytes, integer(value["copiedBytes"]) == expectedBytes,
+              value["stableObserved"] as? Bool == true,
+              let streamHash = value["receivedStreamSHA256"] as? String,
+              streamHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+            throw PhoneAssetExportError.invalidReceipt
+        }
+        let copyData = try readPrivateData(cReceipt, limit: 1024)
+        guard copyData.count <= 1024,
+              let copyValue = try JSONSerialization.jsonObject(with: copyData) as? [String: Any],
+              Set(copyValue.keys) == Set(["source", "status", "declaredBytes", "copiedBytes", "stableObserved", "receivedStreamSHA256"]),
+              copyValue["source"] as? String == "iphone_afc", copyValue["status"] as? String == "asset_copy_complete",
+              integer(copyValue["declaredBytes"]) == expectedBytes, integer(copyValue["copiedBytes"]) == expectedBytes,
+              copyValue["stableObserved"] as? Bool == true, copyValue["receivedStreamSHA256"] as? String == streamHash else {
+            throw PhoneAssetExportError.invalidReceipt
+        }
+        let diskDigest = try hashPrivateFile(media, limit: 32 * 1024 * 1024,
+                                             cancellation: cancellation, deadline: deadline)
+        guard diskDigest.bytes == expectedBytes, diskDigest.sha256 == streamHash else { throw PhoneAssetExportError.invalidReceipt }
+        let receiptHash = SHA256.hash(data: receiptData).map { String(format: "%02x", $0) }.joined()
+        return (media, receipt, Int64(receiptData.count), receiptHash, streamHash)
+    }
+
+    nonisolated private static func readPrivateData(_ url: URL, limit: Int) throws -> Data {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw PhoneAssetExportError.invalidReceipt }
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              (info.st_mode & 0o777) == 0o600, info.st_size >= 0, info.st_size <= limit else {
+            throw PhoneAssetExportError.invalidReceipt
+        }
+        var data = Data(capacity: Int(info.st_size))
+        var buffer = [UInt8](repeating: 0, count: min(16 * 1024, max(1, limit)))
+        while true {
+            let count = buffer.withUnsafeMutableBytes { raw in Darwin.read(descriptor, raw.baseAddress, raw.count) }
+            if count < 0 { throw PhoneAssetExportError.invalidReceipt }
+            if count == 0 { break }
+            guard data.count + count <= limit else { throw PhoneAssetExportError.invalidReceipt }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+        guard data.count == info.st_size else { throw PhoneAssetExportError.invalidReceipt }
+        return data
+    }
+
+    nonisolated private static func hashPrivateFile(_ url: URL, limit: Int64,
+                                                     cancellation: PhoneAssetExportCancellation,
+                                                     deadline: TimeInterval) throws -> (bytes: Int64, sha256: String) {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw PhoneAssetExportError.invalidReceipt }
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              (info.st_mode & 0o777) == 0o600, info.st_size > 0, info.st_size <= limit else {
+            throw PhoneAssetExportError.invalidReceipt
+        }
+        var hash = SHA256()
+        var count: Int64 = 0
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            try ensureActive(cancellation, deadline: deadline)
+            let readCount = buffer.withUnsafeMutableBytes { raw in Darwin.read(descriptor, raw.baseAddress, raw.count) }
+            if readCount < 0 { throw PhoneAssetExportError.invalidReceipt }
+            if readCount == 0 { break }
+            count += Int64(readCount)
+            guard count <= limit else { throw PhoneAssetExportError.invalidReceipt }
+            hash.update(data: Data(buffer.prefix(readCount)))
+        }
+        guard count == Int64(info.st_size) else { throw PhoneAssetExportError.invalidReceipt }
+        return (count, hash.finalize().map { String(format: "%02x", $0) }.joined())
+    }
+
+    nonisolated private static func isNullableInteger(_ value: Any?) -> Bool {
+        if value == nil || value is NSNull { return true }
+        return integer(value) != nil
+    }
+
+    nonisolated private static func validLinkedResources(_ value: Any?) -> Bool {
+        if value == nil || value is NSNull { return true }
+        guard let rows = value as? [[String: Any]] else { return false }
+        let keys: Set<String> = ["ZRESOURCETYPE", "ZDATASTORECLASSID", "ZDATASTORESUBTYPE", "ZVERSION", "ZRECIPEID", "ZDATALENGTH", "ZLOCALAVAILABILITY"]
+        return rows.count <= 64 && rows.allSatisfy { row in
+            Set(row.keys) == keys && row.values.allSatisfy { isNullableInteger($0) }
+        }
+    }
+
+    nonisolated static func runProbe(_ assetID: Int64, _ snapshotFolder: URL, _ timeout: TimeInterval,
+                                     _ cancellation: PhoneAssetExportCancellation,
+                                     scriptURL overrideScriptURL: URL? = nil) -> PhoneAssetCopyProbeResult {
+        guard !cancellation.isCancelled, assetID > 0, timeout.isFinite, timeout > 0, timeout <= 75,
+              let repository = repositoryRoot(for: snapshotFolder) else { return .failed(status: "invalid_arguments") }
+        let script = overrideScriptURL ?? repository.appendingPathComponent("experiments/afc/run-asset-copy-probe.py")
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", processGroupLauncherSource, script.path, "--snapshot", snapshotFolder.path, "--asset-id", String(assetID)]
+        process.currentDirectoryURL = repository
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        var environment = ProcessInfo.processInfo.environment
+        environment.removeValue(forKey: "USBMUXD_SOCKET_ADDRESS")
+        process.environment = environment
+        do { try process.run() } catch { return .failed(status: "process_error") }
+        let outputFD = output.fileHandleForReading.fileDescriptor
+        let flags = fcntl(outputFD, F_GETFL)
+        guard flags >= 0, fcntl(outputFD, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            terminateLauncher(process, groupPID: nil)
+            return .failed(status: "process_error")
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        var groupPID: pid_t?
+        var readiness = Data()
+        var reachedEOF = false
+        var stdout = Data()
+        while process.isRunning || !reachedEOF {
+            if cancellation.isCancelled {
+                terminateLauncher(process, groupPID: groupPID)
+                return .cancelled
+            }
+            if ProcessInfo.processInfo.systemUptime >= deadline {
+                terminateLauncher(process, groupPID: groupPID)
+                return .timedOut
+            }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while !reachedEOF {
+                let count = Darwin.read(outputFD, &buffer, buffer.count)
+                if count > 0 {
+                    let bytes = Data(buffer.prefix(count))
+                    if groupPID == nil {
+                        readiness.append(bytes)
+                        if let newline = readiness.firstIndex(of: 10) {
+                            let line = String(decoding: readiness[..<newline], as: UTF8.self)
+                            guard line.hasPrefix("READY:"), let value = Int32(line.dropFirst(6)), value > 0 else {
+                                terminateLauncher(process, groupPID: nil)
+                                return .failed(status: "process_error")
+                            }
+                            groupPID = pid_t(value)
+                            stdout.append(readiness[(newline + 1)...])
+                            readiness.removeAll()
+                        } else if readiness.count > 64 {
+                            terminateLauncher(process, groupPID: nil)
+                            return .failed(status: "process_error")
+                        }
+                    } else {
+                        stdout.append(bytes)
+                    }
+                    guard stdout.count <= 16 * 1024 else {
+                        terminateLauncher(process, groupPID: groupPID)
+                        return .failed(status: "invalid_output")
+                    }
+                    continue
+                }
+                if count == 0 { reachedEOF = true; break }
+                if errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR {
+                    terminateLauncher(process, groupPID: groupPID)
+                    return .failed(status: "process_error")
+                }
+                break
+            }
+            if groupPID == nil && !process.isRunning { return .failed(status: "process_error") }
+            if process.isRunning || !reachedEOF { Thread.sleep(forTimeInterval: 0.025) }
+        }
+        let data = stdout
+        guard data.count <= 16 * 1024,
+              let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(result.keys) == Set(["source", "status", "copiedBytes", "stableObserved", "localFolder"]),
+              result["source"] as? String == "iphone_afc",
+              let status = result["status"] as? String else { return .failed(status: "invalid_output") }
+        if status != "asset_copy_complete" { return .failed(status: status) }
+        guard process.terminationStatus == 0,
+              let bytes = integer(result["copiedBytes"]), bytes > 0, bytes <= 32 * 1024 * 1024,
+              let folderPath = result["localFolder"] as? String else { return .failed(status: "copy_unverified") }
+        guard result["stableObserved"] as? Bool == true else { return .failed(status: "asset_changed") }
+        let folder = URL(fileURLWithPath: folderPath, isDirectory: true)
+        let cacheRoot = repository.appendingPathComponent(".build/phone-asset-copy-probe", isDirectory: true)
+        guard isContained(folder, in: cacheRoot) else { return .failed(status: "copy_path_invalid") }
+        return .copied(folder: folder, bytes: bytes, stableObserved: true)
+    }
+
+    nonisolated private static func terminateLauncher(_ process: Process, groupPID: pid_t?) {
+        let pid = process.processIdentifier
+        if let groupPID { _ = kill(-groupPID, SIGTERM) }
+        _ = kill(pid, SIGTERM)
+        Thread.sleep(forTimeInterval: 0.25)
+        if let groupPID { _ = kill(-groupPID, SIGKILL) }
+        _ = kill(pid, SIGKILL)
+        if process.isRunning { process.waitUntilExit() }
+    }
+
+    nonisolated private static func copyRegularFile(_ source: URL, to destination: URL, expectedBytes: Int64,
+                                                     cancellation: PhoneAssetExportCancellation,
+                                                     deadline: TimeInterval) throws {
+        let sourceFD = open(source.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard sourceFD >= 0 else { throw PhoneAssetExportError.copyFailed }
+        var sourceOpen = true
+        defer { if sourceOpen { close(sourceFD) } }
+        var sourceInfo = stat()
+        guard fstat(sourceFD, &sourceInfo) == 0, (sourceInfo.st_mode & S_IFMT) == S_IFREG,
+              (sourceInfo.st_mode & 0o777) == 0o600,
+              Int64(sourceInfo.st_size) == expectedBytes, expectedBytes > 0, expectedBytes <= 32 * 1024 * 1024 else {
+            throw PhoneAssetExportError.invalidReceipt
+        }
+        let destinationFD = open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+        guard destinationFD >= 0 else { throw PhoneAssetExportError.copyFailed }
+        var destinationOpen = true
+        defer { if destinationOpen { close(destinationFD) } }
+        guard fchmod(destinationFD, mode_t(0o600)) == 0 else { throw PhoneAssetExportError.copyFailed }
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        var copied: Int64 = 0
+        while true {
+            try ensureActive(cancellation, deadline: deadline)
+            let count = buffer.withUnsafeMutableBytes { raw in
+                Darwin.read(sourceFD, raw.baseAddress, raw.count)
+            }
+            if count < 0 { throw PhoneAssetExportError.copyFailed }
+            if count == 0 { break }
+            copied += Int64(count)
+            guard copied <= expectedBytes else { throw PhoneAssetExportError.changed }
+            var offset = 0
+            while offset < count {
+                let written = buffer.withUnsafeBytes { raw in
+                    Darwin.write(destinationFD, raw.baseAddress!.advanced(by: offset), count - offset)
+                }
+                guard written > 0 else { throw PhoneAssetExportError.copyFailed }
+                offset += written
+            }
+        }
+        guard copied == expectedBytes, fsync(destinationFD) == 0 else { throw PhoneAssetExportError.copyFailed }
+        var finalInfo = stat()
+        guard fstat(destinationFD, &finalInfo) == 0, (finalInfo.st_mode & S_IFMT) == S_IFREG,
+              Int64(finalInfo.st_size) == expectedBytes else { throw PhoneAssetExportError.copyFailed }
+        guard close(destinationFD) == 0 else { destinationOpen = false; throw PhoneAssetExportError.copyFailed }
+        destinationOpen = false
+        guard close(sourceFD) == 0 else { sourceOpen = false; throw PhoneAssetExportError.copyFailed }
+        sourceOpen = false
+    }
+
+    nonisolated private static func writeReport(startedAt: Date, files: [FileReceipt], errors: [String], expected: Int,
+                                    completed: Bool, to folder: URL) throws {
+        try ImportReport(startedAt: startedAt, files: files, errors: errors,
+                         expectedFileCount: expected, completed: completed).write(to: folder)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                              ofItemAtPath: folder.appendingPathComponent("import-report.json").path)
+    }
+
+    nonisolated private static func errorForProbeStatus(_ status: String) -> PhoneAssetExportError {
+        switch status {
+        case "asset_unavailable": return .unavailable
+        case "asset_size_out_of_bounds": return .tooLarge
+        case "asset_changed", "asset_stat_after_failed": return .changed
+        default: return .copyFailed
+        }
+    }
+
+    nonisolated private static func errorMessage(_ error: Error, index: Int) -> String {
+        let reason: String
+        switch error as? PhoneAssetExportError {
+        case .cancelled: reason = "экспорт отменён"
+        case .timedOut: reason = "достигнут общий лимит времени экспорта"
+        case .unavailable: reason = "файл недоступен на телефоне"
+        case .tooLarge: reason = "файл превышает лимит размера"
+        case .changed: reason = "файл изменился во время чтения"
+        case .unsafeFilename: reason = "имя файла нельзя безопасно сохранить"
+        case .invalidReceipt: reason = "проверка скопированного файла не пройдена"
+        case .invalidSnapshot: reason = "источник каталога не прошёл проверку"
+        default: reason = "не удалось скопировать и проверить файл"
+        }
+        return "Файл \(index): \(reason)."
+    }
+
+    nonisolated private static func ensureActive(_ cancellation: PhoneAssetExportCancellation,
+                                                  deadline: TimeInterval) throws {
+        if cancellation.isCancelled { throw PhoneAssetExportError.cancelled }
+        if ProcessInfo.processInfo.systemUptime >= deadline { throw PhoneAssetExportError.timedOut }
+    }
+
+    nonisolated private static func repositoryRoot(for snapshotFolder: URL) -> URL? {
+        let folder = snapshotFolder.standardizedFileURL
+        guard folder.deletingLastPathComponent().lastPathComponent == "phone-catalog-probe" else { return nil }
+        let build = folder.deletingLastPathComponent().deletingLastPathComponent()
+        guard build.lastPathComponent == ".build" else { return nil }
+        return build.deletingLastPathComponent()
+    }
+
+    nonisolated private static func isContained(_ url: URL, in root: URL) -> Bool {
+        let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
+        return resolved.hasPrefix(resolvedRoot) && resolved != root.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    nonisolated private static func isDirectoryWithoutSymlink(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFDIR
+    }
+
+    nonisolated private static func isPrivateDirectory(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFDIR && (info.st_mode & 0o777) == 0o700
+    }
+
+    nonisolated private static func isRegularPrivateFile(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFREG && (info.st_mode & 0o777) == 0o600
+    }
+
+    nonisolated private static func fileSize(_ url: URL) -> Int64? {
+        var info = stat()
+        guard lstat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+        return Int64(info.st_size)
+    }
+
+    nonisolated private static func integer(_ value: Any?) -> Int64? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        return number.int64Value
+    }
+
+    nonisolated private static func safeFilename(_ value: String) -> Bool {
+        guard !value.isEmpty, value != ".", value != "..", !value.contains("/"), !value.contains("\\"),
+              value.utf8.count <= 255 else { return false }
+        return !value.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7f }
+    }
+}

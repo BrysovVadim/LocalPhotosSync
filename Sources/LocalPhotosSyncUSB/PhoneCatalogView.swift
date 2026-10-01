@@ -1,8 +1,10 @@
+import AppKit
 import SwiftUI
 
 struct PhoneCatalogView: View {
     @StateObject private var reader = PhoneCatalogReader()
     @StateObject private var thumbnails = PhoneThumbnailLoader()
+    @ObservedObject var exporter: PhoneAssetExporter
     @State private var category = PhoneCatalogCategory.mediaLibrary
     @State private var type = PhoneCatalogTypeFilter.all
     @State private var search = ""
@@ -17,6 +19,9 @@ struct PhoneCatalogView: View {
     private var pageCount: Int { max(1, (visibleAssets.count + pageSize - 1) / pageSize) }
     private var pageAssets: [PhoneCatalogAsset] {
         Array(visibleAssets.dropFirst(min(page, pageCount - 1) * pageSize).prefix(pageSize))
+    }
+    private var selectedAssets: [PhoneCatalogAsset] {
+        reader.snapshot?.assets.filter { selected.contains($0.id) } ?? []
     }
 
     var body: some View {
@@ -38,7 +43,7 @@ struct PhoneCatalogView: View {
                         Label("Обновить с iPhone", systemImage: "arrow.clockwise")
                     }
                 }
-                .disabled(reader.isRefreshing || reader.isLoadingSnapshot || thumbnails.isLoading)
+                .disabled(reader.isRefreshing || reader.isLoadingSnapshot || thumbnails.isLoading || exporter.isExporting)
             }
 
             if let error = reader.errorMessage {
@@ -86,14 +91,34 @@ struct PhoneCatalogView: View {
                     } label: {
                         Label(thumbnails.isLoading ? "Загрузка превью…" : "Загрузить превью", systemImage: "photo")
                     }
-                    .disabled(thumbnails.isLoading || reader.isRefreshing || !thumbnails.canLoad(pageAssets))
+                    .disabled(thumbnails.isLoading || reader.isRefreshing || exporter.isExporting || !thumbnails.canLoad(pageAssets))
                     Text("До 12 файлов за раз").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Text("Выбрано: \(selected.count)").monospacedDigit()
-                    Button("Снять выбор") { selected.removeAll() }.disabled(selected.isEmpty)
+                    Button("Снять выбор") { selected.removeAll() }.disabled(selected.isEmpty || exporter.isExporting)
                 }
                 if let message = thumbnails.message {
                     Text(message).font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button {
+                        chooseExportFolder(for: snapshot)
+                    } label: {
+                        Label(exporter.isExporting ? "Сохраняем…" : "Сохранить выбранные файлы…", systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(selectedAssets.isEmpty || selectedAssets.count > 12 || exporter.isExporting || thumbnails.isLoading || reader.isRefreshing || reader.isLoadingSnapshot)
+                    Text("Первый прогон: до 12 файлов, каждый до 32 МБ")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if exporter.isExporting {
+                        Button("Остановить") { exporter.cancel() }
+                    }
+                    Spacer()
+                    if let folder = exporter.outputFolder {
+                        Button("Открыть папку") { NSWorkspace.shared.open(folder) }
+                    }
+                }
+                if let message = exporter.message {
+                    Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 175), spacing: 12)], spacing: 12) {
@@ -112,7 +137,8 @@ struct PhoneCatalogView: View {
                         .font(.caption).monospacedDigit()
                     Button("Следующая") { page = min(pageCount - 1, page + 1) }.disabled(page >= pageCount - 1)
                     Spacer()
-                    Text("Перенос выбранных записей пока не подключён").font(.caption).foregroundStyle(.secondary)
+                    Text("Сохраняется доступный файл. Полнота оригинала и Live Photo ещё не проверена.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             } else if reader.isRefreshing || reader.isLoadingSnapshot {
                 ContentUnavailableView {
@@ -168,6 +194,15 @@ struct PhoneCatalogView: View {
                 Text(asset.filename.isEmpty ? "Имя файла не указано" : asset.filename)
                     .font(.callout).lineLimit(1)
                 Text(rowDetails(for: asset)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if exporter.sourceFolder == reader.snapshot?.sourceFolder {
+                    if exporter.savedAssetIDs.contains(asset.id) {
+                        Label("Файл сохранён", systemImage: "checkmark.circle")
+                            .font(.caption2).foregroundStyle(.green)
+                    } else if exporter.failedAssetIDs.contains(asset.id) {
+                        Label("Не сохранён", systemImage: "exclamationmark.circle")
+                            .font(.caption2).foregroundStyle(.orange)
+                    }
+                }
                 if asset.isHidden || asset.visibilityState != 0 {
                     Text(asset.isHidden ? "Скрыто" : "Дополнительная запись")
                         .font(.caption2).foregroundStyle(.secondary)
@@ -179,6 +214,7 @@ struct PhoneCatalogView: View {
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected.contains(asset.id) ? Color.accentColor : .clear, lineWidth: 2))
         }
         .buttonStyle(.plain)
+        .disabled(exporter.isExporting || !asset.isVisibleLibraryItem || (asset.mediaType != .photo && asset.mediaType != .video))
         .accessibilityLabel("\(asset.filename), \(rowDetails(for: asset))")
         .accessibilityValue(selected.contains(asset.id) ? "Выбрано" : "Не выбрано")
     }
@@ -194,6 +230,18 @@ struct PhoneCatalogView: View {
         case .unknownScope:
             return "Записи, для которых категория каталога не распознана. Превью этой категории пока не подключены."
         }
+    }
+
+    private func chooseExportFolder(for snapshot: PhoneCatalogSnapshot) {
+        let panel = NSOpenPanel()
+        panel.title = "Сохранить доступные файлы с iPhone"
+        panel.prompt = "Сохранить сюда"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        exporter.export(assets: selectedAssets, snapshot: snapshot, destination: destination)
     }
 
     private func countCard(title: String, detail: String, photos: Int, videos: Int) -> some View {
