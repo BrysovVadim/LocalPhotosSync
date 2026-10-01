@@ -125,6 +125,7 @@ private struct ArchiveHistoryView: View {
                 reveal: { NSWorkspace.shared.activateFileViewerSelecting([$0]) },
                 openReport: { NSWorkspace.shared.open($0) },
                 addDropped: { history.add($0) },
+                openFile: { NSWorkspace.shared.open($0) },
                 remove: { history.remove($0) }))
         .onAppear { history.loadSummaries() }
     }

@@ -8,6 +8,7 @@ struct ArchiveHistoryActions {
     var reveal: (URL) -> Void = { _ in }
     var openReport: (URL) -> Void = { _ in }
     var addDropped: ([URL]) -> Void = { _ in }
+    var openFile: (URL) -> Void = { _ in }
     var remove: (UUID) -> Void = { _ in }
 }
 
@@ -55,6 +56,7 @@ struct ArchiveHistoryScreen: View {
     let summaries: [UUID: ArchiveReportSummary]
     let actions: ArchiveHistoryActions
     @State private var onlyProblems = false
+    @State private var contentsRecord: ArchiveRecord?
 
     init(records: [ArchiveRecord], checks: [UUID: ArchiveCheckState], isChecking: Bool, message: String?,
          summaries: [UUID: ArchiveReportSummary] = [:], actions: ArchiveHistoryActions) {
@@ -116,6 +118,14 @@ struct ArchiveHistoryScreen: View {
                 .background(.bar)
         }
         .frame(minWidth: 760, minHeight: 540)
+        .sheet(item: $contentsRecord) { record in
+            ArchiveContentsSheet(
+                folderName: record.name,
+                entries: ArchiveContents.read(folder: record.url),
+                open: { actions.openFile(record.url.appendingPathComponent($0)) },
+                reveal: { actions.reveal(record.url.appendingPathComponent($0)) },
+                close: { contentsRecord = nil })
+        }
         .dropDestination(for: URL.self) { urls, _ in
             let folders = urls.filter {
                 $0.isFileURL && ($0.hasDirectoryPath || (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true)
@@ -230,6 +240,8 @@ struct ArchiveHistoryScreen: View {
             .help("Показать в Finder")
             .disabled(missing)
             Menu {
+                Button("Содержимое…") { contentsRecord = record }
+                    .disabled(missing)
                 Button("Открыть отчёт") { actions.openReport(record.url.appendingPathComponent("import-report.json")) }
                     .disabled(missing)
                 Divider()

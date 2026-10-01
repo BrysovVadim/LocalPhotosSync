@@ -409,3 +409,61 @@ final class ArchiveQueueAndMessageTests: XCTestCase {
         XCTAssertNotNil(store.message, "A warning about the history file must survive a successful add (was: \(warning))")
     }
 }
+
+final class ArchiveContentsTests: XCTestCase {
+    static func makeArchive() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        var receipts: [FileReceipt] = []
+        for (index, name) in ["IMG_0001.HEIC", "IMG_0002.MOV"].enumerated() {
+            let item = root.appendingPathComponent(String(format: "%05d", index + 1), isDirectory: true)
+            try FileManager.default.createDirectory(at: item, withIntermediateDirectories: true)
+            let media = item.appendingPathComponent(name)
+            try Data(repeating: UInt8(index + 1), count: 1_000 * (index + 1)).write(to: media)
+            if index == 0 { try Data(repeating: 9, count: 500).write(to: item.appendingPathComponent("IMG_0001.MOV")) }
+            receipts.append(try FileReceipt.verify(url: media, sourceName: name, sourceBytes: Int64(1_000 * (index + 1))))
+        }
+        try ImportReport(startedAt: Date(), files: receipts, errors: [], expectedFileCount: 2, completed: true).write(to: root)
+        return root
+    }
+
+    func testReadsFilesWithCompanionsFromReport() throws {
+        let root = try Self.makeArchive()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entries = try XCTUnwrap(ArchiveContents.read(folder: root))
+        XCTAssertEqual(entries.map(\.name), ["IMG_0001.HEIC", "IMG_0002.MOV"])
+        XCTAssertEqual(entries.map(\.relativePath), ["00001/IMG_0001.HEIC", "00002/IMG_0002.MOV"])
+        XCTAssertEqual(entries[0].companions, [.init(name: "IMG_0001.MOV", bytes: 500)])
+        XCTAssertTrue(entries[1].companions.isEmpty)
+        XCTAssertEqual(entries[1].bytes, 2_000)
+        XCTAssertNil(ArchiveContents.read(folder: root.appendingPathComponent("missing")))
+    }
+
+    func testUnsafeRelativePathsAreNotOffered() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let report = """
+        {"files":[{"sourceName":"x.heic","savedPath":"/etc/x","relativePath":"../../etc/passwd","savedBytes":1,"sha256":"ab"}],
+         "companionFiles":[{"path":"/abs/evil.mov","bytes":1,"sha256":"cd"}]}
+        """
+        try Data(report.utf8).write(to: root.appendingPathComponent("import-report.json"))
+        let entries = try XCTUnwrap(ArchiveContents.read(folder: root))
+        XCTAssertNil(entries[0].relativePath, "Paths escaping the archive are never opened or revealed")
+        XCTAssertTrue(entries[0].companions.isEmpty)
+    }
+}
+
+/// Renders the archive contents sheet (needs `LPS_RENDER_DIR`).
+@MainActor
+final class ArchiveContentsRenderTests: XCTestCase {
+    func testRendersContentsSheet() throws {
+        let output = try ScreenRenderer.outputDirectory()
+        let root = try ArchiveContentsTests.makeArchive()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sheet = ArchiveContentsSheet(folderName: "LocalPhotosSync-2026-10-01T20-45-12Z-3F2A9C1E",
+                                         entries: ArchiveContents.read(folder: root),
+                                         open: { _ in }, reveal: { _ in }, close: {})
+        try ScreenRenderer.render(sheet, size: CGSize(width: 620, height: 460))
+            .write(to: output.appendingPathComponent("archive-contents.png"))
+    }
+}
