@@ -217,3 +217,41 @@ final class PhoneCatalogSetupRenderTests: XCTestCase {
             .write(to: output.appendingPathComponent("catalog-setup-problem.png"))
     }
 }
+
+final class CatalogProgressTests: XCTestCase {
+    func testAddingMergesPerSnapshotAndKeepsRecentOnes() {
+        let archive = URL(fileURLWithPath: "/archives/run-1")
+        var file = CatalogProgressFile()
+        file = file.adding([1, 2], snapshotFolder: URL(fileURLWithPath: "/snap/a"), archive: archive, at: Date(timeIntervalSince1970: 10))
+        file = file.adding([2, 3], snapshotFolder: URL(fileURLWithPath: "/snap/a/"), archive: URL(fileURLWithPath: "/archives/run-2"),
+                           at: Date(timeIntervalSince1970: 20))
+        XCTAssertEqual(file.saved(in: URL(fileURLWithPath: "/snap/a")),
+                       [1: "/archives/run-1", 2: "/archives/run-2", 3: "/archives/run-2"])
+        XCTAssertTrue(file.saved(in: URL(fileURLWithPath: "/snap/b")).isEmpty, "Marks never cross snapshots")
+        XCTAssertEqual(file.adding([], snapshotFolder: URL(fileURLWithPath: "/snap/c"), archive: archive, at: Date()), file)
+
+        for index in 0..<7 {
+            file = file.adding([Int64(index)], snapshotFolder: URL(fileURLWithPath: "/snap/n\(index)"), archive: archive,
+                               at: Date(timeIntervalSince1970: TimeInterval(100 + index)))
+        }
+        XCTAssertEqual(file.snapshots.count, CatalogProgressFile.keptSnapshots)
+        XCTAssertTrue(file.saved(in: URL(fileURLWithPath: "/snap/a")).isEmpty, "The oldest snapshots are dropped")
+        XCTAssertFalse(file.saved(in: URL(fileURLWithPath: "/snap/n6")).isEmpty)
+    }
+
+    @MainActor
+    func testStorePersistsWithoutFileNames() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("progress.json")
+        let store = CatalogProgressStore(fileURL: file)
+        store.record([42], snapshotFolder: URL(fileURLWithPath: "/snap/a"), archive: URL(fileURLWithPath: "/archives/run"))
+        let reloaded = CatalogProgressStore(fileURL: file)
+        XCTAssertEqual(reloaded.savedIDs(in: URL(fileURLWithPath: "/snap/a")), [42: "/archives/run"])
+        let text = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertFalse(text.contains(".HEIC"))
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+}

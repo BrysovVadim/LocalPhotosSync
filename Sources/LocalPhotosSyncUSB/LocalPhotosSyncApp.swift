@@ -4,14 +4,16 @@ struct LocalPhotosSyncApp: App {
     @StateObject private var store = CameraStore()
     @StateObject private var exporter = PhoneAssetExporter()
     @StateObject private var history = ArchiveHistoryStore()
+    @StateObject private var progress = CatalogProgressStore()
     @State private var attention = TransferAttention()
 
     var body: some Scene {
         WindowGroup("Фото с iPhone") {
-            MainWindow(store: store, exporter: exporter, history: history)
+            MainWindow(store: store, exporter: exporter, history: history, progress: progress)
                 .onAppear {
                     history.observe(exporter: exporter, camera: store)
                     attention.observe(exporter: exporter, camera: store)
+                    progress.observe(exporter: exporter)
                     history.runLaunchCheckIfEnabled()
                 }
         }
@@ -37,11 +39,12 @@ private struct MainWindow: View {
     @ObservedObject var store: CameraStore
     @ObservedObject var exporter: PhoneAssetExporter
     @ObservedObject var history: ArchiveHistoryStore
+    let progress: CatalogProgressStore
     @SceneStorage("mainTab") private var tab = MainTab.catalog.rawValue
 
     var body: some View {
         TabView(selection: $tab) {
-            PhoneCatalogView(exporter: exporter)
+            PhoneCatalogView(exporter: exporter, progress: progress)
                 .disabled(store.importing)
                 .tabItem { Label("Каталог iPhone", systemImage: "iphone") }
                 .tag(MainTab.catalog.rawValue)

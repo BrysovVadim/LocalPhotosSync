@@ -12,6 +12,8 @@ struct PhoneCatalogView: View {
     @State private var selectionAnchor: Int64?
     @State private var showOnlySelected = false
     @AppStorage("catalog.oldestFirst") private var oldestFirst = false
+    @ObservedObject private var progress: CatalogProgressStore
+    @AppStorage("catalog.hideSaved") private var hideSaved = false
     @State private var previewIndex: Int?
     /// Cards of the page when the preview opened; frozen so selection changes cannot shift or empty the list.
     @State private var previewAssets: [PhoneCatalogAsset] = []
@@ -22,10 +24,22 @@ struct PhoneCatalogView: View {
     @State private var page = 0
     private let pageSize = 24
 
-    init(exporter: PhoneAssetExporter, reader: PhoneCatalogReader? = nil, selected: Set<Int64> = []) {
+    init(exporter: PhoneAssetExporter, reader: PhoneCatalogReader? = nil, progress: CatalogProgressStore? = nil,
+         selected: Set<Int64> = []) {
         self.exporter = exporter
         _reader = StateObject(wrappedValue: reader ?? PhoneCatalogReader())
+        _progress = ObservedObject(wrappedValue: progress ?? CatalogProgressStore(fileURL: nil))
         _selected = State(initialValue: selected)
+    }
+
+    /// Records of the current snapshot saved earlier or in this session, with their archive folder when known.
+    private func savedEarlier(in snapshot: PhoneCatalogSnapshot) -> [Int64: String] {
+        progress.savedIDs(in: snapshot.sourceFolder)
+    }
+
+    private func isSaved(_ id: Int64, in snapshot: PhoneCatalogSnapshot) -> Bool {
+        (exporter.sourceFolder == snapshot.sourceFolder && exporter.savedAssetIDs.contains(id)) ||
+            savedEarlier(in: snapshot)[id] != nil
     }
 
     private var category: PhoneCatalogCategory {
@@ -47,8 +61,9 @@ struct PhoneCatalogView: View {
     }
 
     private func filteredAssets(in snapshot: PhoneCatalogSnapshot) -> [PhoneCatalogAsset] {
-        let assets = DisplayOrder.apply(snapshot.assets(category: category, type: type, search: search),
+        var assets = DisplayOrder.apply(snapshot.assets(category: category, type: type, search: search),
                                         oldestFirst: oldestFirst)
+        if hideSaved { assets.removeAll { isSaved($0.id, in: snapshot) } }
         return showOnlySelected ? assets.filter { selected.contains($0.id) } : assets
     }
 
@@ -110,6 +125,7 @@ struct PhoneCatalogView: View {
         }
         .onChange(of: showOnlySelected) { _, _ in page = 0; selectionAnchor = nil }
         .onChange(of: oldestFirst) { _, _ in page = 0; selectionAnchor = nil; thumbnails.supersede() }
+        .onChange(of: hideSaved) { _, _ in page = 0; selectionAnchor = nil; thumbnails.supersede() }
         .onChange(of: reader.snapshot?.sourceFolder) { _, _ in
             page = 0
             selected.removeAll()
@@ -134,7 +150,8 @@ struct PhoneCatalogView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Каталог iPhone").font(.title.bold())
                 if let snapshot = reader.snapshot {
-                    Text("Снимок от \(snapshot.snapshotDate.formatted(date: .abbreviated, time: .shortened)). Оригиналы проверяются отдельно.")
+                    Text("Снимок от \(snapshot.snapshotDate.formatted(date: .abbreviated, time: .shortened)). Оригиналы проверяются отдельно." +
+                         savedCountText(snapshot))
                         .font(.callout).foregroundStyle(.secondary)
                 } else {
                     Text("Список фото и видео самого телефона по USB")
@@ -147,6 +164,9 @@ struct PhoneCatalogView: View {
                 statChip(.allRecords, counts: snapshot.counts(in: .allRecords))
             }
             Menu {
+                Toggle("Скрывать сохранённые", isOn: $hideSaved)
+                    .disabled(reader.snapshot == nil)
+                Divider()
                 Button("Сохранить список (CSV)…") { saveListAsCSV() }
                     .disabled(reader.snapshot == nil)
                 Button("Скопировать диагностику") {
@@ -246,7 +266,7 @@ struct PhoneCatalogView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 4)
         }
-        .id("\(category.storageCode)-\(type.storageCode)-\(currentPage)-\(oldestFirst)-\(showOnlySelected)")
+        .id("\(category.storageCode)-\(type.storageCode)-\(currentPage)-\(oldestFirst)-\(showOnlySelected)-\(hideSaved)")
         .overlay {
             if visible.isEmpty {
                 emptyResults
@@ -309,6 +329,12 @@ struct PhoneCatalogView: View {
             .disabled(months.count < 2)
             .help("Перейти к месяцу. Число — записей за месяц с учётом категории, типа и поиска.")
         }
+    }
+
+    private func savedCountText(_ snapshot: PhoneCatalogSnapshot) -> String {
+        var ids = Set(savedEarlier(in: snapshot).keys)
+        if exporter.sourceFolder == snapshot.sourceFolder { ids.formUnion(exporter.savedAssetIDs) }
+        return ids.isEmpty ? "" : " Сохранено из этого снимка: \(ids.count)."
     }
 
     private func currentMonthTitle(_ pageAssets: [PhoneCatalogAsset]) -> String {
@@ -551,14 +577,16 @@ struct PhoneCatalogView: View {
                    check.sourceFolder == snapshot.sourceFolder {
                     availabilityLabel(for: check)
                 }
-                if exporter.sourceFolder == snapshot.sourceFolder {
-                    if exporter.savedAssetIDs.contains(asset.id) {
-                        Label("Файл сохранён", systemImage: "checkmark.circle")
-                            .font(.caption2).foregroundStyle(.green)
-                    } else if exporter.failedAssetIDs.contains(asset.id) {
-                        Label("Не сохранён", systemImage: "exclamationmark.circle")
-                            .font(.caption2).foregroundStyle(.orange)
-                    }
+                if exporter.sourceFolder == snapshot.sourceFolder && exporter.savedAssetIDs.contains(asset.id) {
+                    Label("Файл сохранён", systemImage: "checkmark.circle")
+                        .font(.caption2).foregroundStyle(.green)
+                } else if let archive = savedEarlier(in: snapshot)[asset.id] {
+                    Label("Сохранено ранее", systemImage: "checkmark.circle")
+                        .font(.caption2).foregroundStyle(Color.green.opacity(0.8))
+                        .help("Сохранено в \(archive). Отметка относится к этому снимку каталога.")
+                } else if exporter.sourceFolder == snapshot.sourceFolder && exporter.failedAssetIDs.contains(asset.id) {
+                    Label("Не сохранён", systemImage: "exclamationmark.circle")
+                        .font(.caption2).foregroundStyle(.orange)
                 }
                 if asset.isHidden || asset.visibilityState != 0 {
                     Text(asset.isHidden ? "Скрыто" : "Дополнительная запись")
@@ -679,7 +707,7 @@ struct PhoneCatalogView: View {
 
     /// Everything that can make an automatic preview load possible or necessary.
     private var autoLoadKey: String {
-        [String(page), category.rawValue, type.rawValue, search, String(showOnlySelected), String(oldestFirst), String(autoLoadPreviews), String(isEnabled),
+        [String(page), category.rawValue, type.rawValue, search, String(showOnlySelected), String(oldestFirst), String(hideSaved), String(autoLoadPreviews), String(isEnabled),
          String(thumbnails.isLoading), String(exporter.isExporting), String(reader.isRefreshing),
          String(reader.isLoadingSnapshot), reader.snapshot?.sourceFolder.path ?? ""].joined(separator: "|")
     }

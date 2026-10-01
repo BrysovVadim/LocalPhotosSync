@@ -40,6 +40,14 @@ final class PhoneCatalogViewRenderTests: XCTestCase {
         try ScreenRenderer.render(checked, size: CGSize(width: 1060, height: 760))
             .write(to: output.appendingPathComponent("catalog-after-check.png"))
 
+        let progress = CatalogProgressStore(fileURL: nil)
+        progress.record(Set(ids.dropFirst(2).prefix(4)), snapshotFolder: snapshot.sourceFolder,
+                        archive: URL(fileURLWithPath: "/Users/me/Архив фото/LocalPhotosSync-2026-09-20T10-00-00Z-1A2B3C4D"))
+        let savedView = PhoneCatalogView(exporter: PhoneAssetExporter(), reader: PhoneCatalogReader(fixedSnapshot: snapshot),
+                                         progress: progress)
+        try ScreenRenderer.render(savedView, size: CGSize(width: 1060, height: 760))
+            .write(to: output.appendingPathComponent("catalog-saved-earlier.png"))
+
         let defaults = UserDefaults.standard
         let previousSize = defaults.object(forKey: "catalog.tileSize")
         defaults.set(PhoneCatalogTileSize.steps.last, forKey: "catalog.tileSize")
