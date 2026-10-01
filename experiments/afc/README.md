@@ -53,6 +53,8 @@ python3 -m unittest discover -s Tests/AFCThumbnail
 
 В интерфейсе серия ограничена 12 превью и общим монотонным дедлайном 45 секунд. Завершаются и runner, и его дочерний helper. Кэш в памяти ограничен 96 изображениями; скрытые и дополнительные категории в этой итерации не получают превью.
 
+Отдельная [проба полного файла](../../docs/phone-originals.md) читает лишь атрибуты и максимум 16 байт пути ассета. Она не используется интерфейсом, не создаёт копию медиа и не подтверждает полноту оригинала. На первом запуске USB уже отсутствовал, поэтому доступность файлов ещё не проверена.
+
 Пути основаны на [наблюдениях устройства с iOS 16](https://forensicfolder.wordpress.com/2025/09/12/ios-photos-application-forensic-overview/) и [эксперименте с оптимизацией хранения](https://theforensicscooter.com/2022/12/05/do-you-have-a-full-sized-assetor-just-a-thumbnail-did-optimized-iphone-storage-process-occur/). Это не контракт для всех версий iOS. Привязка проверяет телефон, но не неизменность пути после снимка каталога.
 
 Источники: [стандартный AFC/ifuse](https://github.com/libimobiledevice/ifuse#usage), [API AFC](https://github.com/libimobiledevice/libimobiledevice/blob/1.4.0/include/libimobiledevice/afc.h), [исследовательский запрос iOS 17](https://github.com/ScottKjr3347/PhotoData-Synd-Photos.sqlite_Queries/blob/main/iOS17_PhotoData-SyndPL_Photos.sqlite_Queries/1.9.17_iOS17_PhDaPs-or-SyndPs_Assets_REFERENCE.txt).

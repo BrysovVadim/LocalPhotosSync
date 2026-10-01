@@ -181,6 +181,13 @@ enum PhoneCatalogDatabase {
         return PhoneCatalogSnapshot(assets: assets, snapshotDate: snapshotDate, sourceFolder: snapshotFolder)
     }
 
+    static func validatedSnapshotDate(in folder: URL) throws -> Date {
+        let databaseURL = folder.appendingPathComponent("Photos.sqlite")
+        let date = try validateReceipt(in: folder, databaseURL: databaseURL)
+        try validateSidecars(in: folder)
+        return date
+    }
+
     private static func validateReceipt(in folder: URL, databaseURL: URL) throws -> Date {
         let receiptURL = folder.appendingPathComponent("catalog-receipt.json")
         guard isRegularFileWithoutSymlink(databaseURL), isRegularFileWithoutSymlink(receiptURL),
@@ -361,18 +368,20 @@ final class PhoneCatalogReader: ObservableObject {
         }.value
     }
 
-    nonisolated private static func loadLatest(in buildDirectory: URL) async -> Result<PhoneCatalogSnapshot, PhoneCatalogError> {
+    nonisolated static func loadLatest(in buildDirectory: URL) async -> Result<PhoneCatalogSnapshot, PhoneCatalogError> {
         await Task.detached(priority: .utility) {
             let root = buildDirectory.appendingPathComponent("phone-catalog-probe", isDirectory: true)
-            guard let folders = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else {
+            guard let folders = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
                 return .failure(.snapshotUnavailable)
             }
-            let sorted = folders.sorted {
-                let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                return left > right
+            let sorted = folders.compactMap { folder -> (URL, Date)? in
+                guard isContained(folder, in: root),
+                      let capturedAt = try? PhoneCatalogDatabase.validatedSnapshotDate(in: folder) else { return nil }
+                return (folder, capturedAt)
+            }.sorted {
+                $0.1 > $1.1
             }
-            for folder in sorted where isContained(folder, in: root) {
+            for (folder, _) in sorted {
                 if case .success(let result) = loadSnapshot(folder: folder) { return .success(result) }
             }
             return .failure(.snapshotUnavailable)

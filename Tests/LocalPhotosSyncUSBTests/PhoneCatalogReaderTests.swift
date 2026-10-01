@@ -51,6 +51,35 @@ final class PhoneCatalogReaderTests: XCTestCase {
         }
     }
 
+    func testLatestSnapshotUsesReceiptCaptureDateInsteadOfFolderModificationDate() async throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let buildDirectory = temporary.appendingPathComponent("build", isDirectory: true)
+        let snapshots = buildDirectory.appendingPathComponent("phone-catalog-probe", isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+
+        let olderCapture = snapshots.appendingPathComponent("older", isDirectory: true)
+        let newerCapture = snapshots.appendingPathComponent("newer", isDirectory: true)
+        _ = try makeDatabase(rows: [(1, "older.heic", 0, 0, 0, 0, 0)],
+                             directory: olderCapture, capturedAt: "2026-10-01T10:00:00.000Z")
+        _ = try makeDatabase(rows: [(2, "newer.heic", 0, 0, 0, 0, 0)],
+                             directory: newerCapture, capturedAt: "2026-10-01T11:00:00.000Z")
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_900_000_000)],
+                                              ofItemAtPath: olderCapture.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
+                                              ofItemAtPath: newerCapture.path)
+
+        let result = await PhoneCatalogReader.loadLatest(in: buildDirectory)
+        guard case .success(let snapshot) = result else {
+            return XCTFail("Expected the snapshot with the newest validated receipt capture date")
+        }
+        XCTAssertEqual(snapshot.sourceFolder.resolvingSymlinksInPath(), newerCapture.resolvingSymlinksInPath())
+        XCTAssertEqual(snapshot.assets.map(\.filename), ["newer.heic"])
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        XCTAssertEqual(snapshot.snapshotDate, formatter.date(from: "2026-10-01T11:00:00.000Z"))
+    }
+
     func testNullCategoricalValueFailsAndNullDateStaysAbsent() throws {
         let database = try makeDatabase(rows: [(1, "date.heic", 0, 0, 0, 0, 0)])
         defer { try? FileManager.default.removeItem(at: database.deletingLastPathComponent()) }
@@ -66,8 +95,10 @@ final class PhoneCatalogReaderTests: XCTestCase {
         }
     }
 
-    private func makeDatabase(rows: [(Int64, String, Int64, Int64?, Int64, Int64, Int64)]) throws -> URL {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    private func makeDatabase(rows: [(Int64, String, Int64, Int64?, Int64, Int64, Int64)],
+                              directory: URL? = nil,
+                              capturedAt: String = "2026-09-30T12:00:00.000Z") throws -> URL {
+        let directory = directory ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let database = directory.appendingPathComponent("Photos.sqlite")
         try execute("""
@@ -81,15 +112,15 @@ final class PhoneCatalogReaderTests: XCTestCase {
             let escapedName = row.1.replacingOccurrences(of: "'", with: "''")
             try execute("INSERT INTO ZASSET VALUES (\(row.0), '\(escapedName)', 1, \(row.2), \(scope), \(row.4), \(row.5), \(row.6))", at: database)
         }
-        try writeReceipt(for: database)
+        try writeReceipt(for: database, capturedAt: capturedAt)
         return database
     }
 
-    private func writeReceipt(for database: URL) throws {
+    private func writeReceipt(for database: URL, capturedAt: String = "2026-09-30T12:00:00.000Z") throws {
         let size = (try FileManager.default.attributesOfItem(atPath: database.path)[.size] as? NSNumber)?.int64Value ?? 0
         let receipt: [String: Any] = [
             "source": "iphone_afc", "status": "metadata_copy_complete",
-            "capturedAt": "2026-09-30T12:00:00.000Z", "usbDevices": 1,
+            "capturedAt": capturedAt, "usbDevices": 1,
             "candidateBytes": size, "sqliteHeader": true,
             "databaseBytesCopied": size, "databaseStableObserved": true,
             "walPresent": false, "walBytesCopied": 0, "walStableObserved": false,
