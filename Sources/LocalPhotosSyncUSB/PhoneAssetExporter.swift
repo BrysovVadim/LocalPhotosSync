@@ -314,6 +314,7 @@ final class PhoneAssetExporter: ObservableObject {
         var savedIDs: Set<Int64> = []
         var pendingSavedIDs: Set<Int64> = []
         var errors: [String] = []
+        var hasUnavailableFiles = false
         do { try writeReport(startedAt: startedAt, files: receipts, errors: errors, expected: assets.count, completed: false, to: runFolder) }
         catch {
             return PhoneAssetExportOutcome(folder: runFolder, exported: 0, failed: assets.count,
@@ -374,6 +375,9 @@ final class PhoneAssetExporter: ObservableObject {
                 }
                 }
             } catch {
+                if case .unavailable? = error as? PhoneAssetExportError {
+                    hasUnavailableFiles = true
+                }
                 errors.append(errorMessage(error, index: index))
             }
             if cancellation.isCancelled && !stopAfterCheckpoint {
@@ -414,9 +418,17 @@ final class PhoneAssetExporter: ObservableObject {
             }
         }
         let failed = assets.count - savedIDs.count
-        let finalMessage = verificationIsComplete
+        var finalMessage = verificationIsComplete
             ? "Экспорт доступных файлов завершён: \(savedIDs.count) из \(assets.count). Полнота оригиналов не подтверждена."
-            : "Экспорт доступных файлов сохранён частично: \(savedIDs.count) из \(assets.count). Ошибок: \(max(failed, errors.count))."
+            : (savedIDs.isEmpty
+               ? "Не удалось сохранить файлы: 0 из \(assets.count). Ошибок: \(max(failed, errors.count))."
+               : "Экспорт доступных файлов сохранён частично: \(savedIDs.count) из \(assets.count). Ошибок: \(max(failed, errors.count)).")
+        if !verificationIsComplete {
+            finalMessage += "\n" + errors.prefix(3).joined(separator: "\n")
+            if hasUnavailableFiles {
+                finalMessage += "\nОткройте нужное фото или видео на iPhone, дождитесь загрузки и нажмите «Проверить файлы». Если файл станет доступен, повторите сохранение."
+            }
+        }
         return PhoneAssetExportOutcome(folder: runFolder, exported: savedIDs.count, failed: failed,
                                        savedAssetIDs: savedIDs, failedAssetIDs: Set(assets.map(\.id)).subtracting(savedIDs),
                                        message: finalMessage)

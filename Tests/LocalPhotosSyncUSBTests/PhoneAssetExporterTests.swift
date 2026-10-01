@@ -212,6 +212,34 @@ final class PhoneAssetExporterTests: XCTestCase {
     }
 
     @MainActor
+    func testUnavailableOnlyAssetShowsReasonAndRetryGuidanceWithoutClaimingSavedFiles() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let asset = makeAsset(id: 60, filename: "missing.heic", type: .photo)
+        let exporter = PhoneAssetExporter(probeRunner: Self.fakeRunner(
+            cacheRoot: fixture.cacheRoot,
+            behaviors: [60: .fail("asset_unavailable")]
+        ))
+
+        exporter.export(assets: [asset], snapshot: fixture.snapshot, destination: fixture.destination)
+        await waitForCompletion(exporter)
+
+        let message = try XCTUnwrap(exporter.message)
+        XCTAssertTrue(message.contains("Не удалось сохранить файлы: 0 из 1"))
+        XCTAssertTrue(message.contains("Файл 1: файл недоступен на телефоне."))
+        XCTAssertTrue(message.contains("«Проверить файлы»"))
+        XCTAssertFalse(message.contains("частично"))
+        XCTAssertFalse(message.contains("iCloud"))
+        XCTAssertEqual(exporter.exportedCount, 0)
+        XCTAssertTrue(exporter.savedAssetIDs.isEmpty)
+        XCTAssertEqual(exporter.failedAssetIDs, [60])
+        let reportURL = try XCTUnwrap(exporter.outputFolder).appendingPathComponent("import-report.json")
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: reportURL)) as? [String: Any])
+        XCTAssertEqual(report["completed"] as? Bool, false)
+        XCTAssertEqual((report["files"] as? [Any])?.count, 0)
+    }
+
+    @MainActor
     func testUnavailableSecondAssetKeepsFirstAssetAndIncompleteCheckpoint() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -229,6 +257,10 @@ final class PhoneAssetExporterTests: XCTestCase {
         XCTAssertEqual(exporter.failedAssetIDs, [62])
         XCTAssertEqual(exporter.exportedCount, 1)
         XCTAssertEqual(exporter.failedCount, 1)
+        let message = try XCTUnwrap(exporter.message)
+        XCTAssertTrue(message.contains("сохранён частично: 1 из 2"))
+        XCTAssertTrue(message.contains("Файл 2: файл недоступен на телефоне."))
+        XCTAssertTrue(message.contains("«Проверить файлы»"))
         let runFolder = try XCTUnwrap(exporter.outputFolder)
         XCTAssertTrue(FileManager.default.fileExists(atPath: runFolder.appendingPathComponent("00001/first.heic").path))
         let reportURL = runFolder.appendingPathComponent("import-report.json")
