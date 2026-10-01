@@ -3,6 +3,7 @@ import SwiftUI
 struct LocalPhotosSyncApp: App {
     @StateObject private var store = CameraStore()
     @StateObject private var exporter = PhoneAssetExporter()
+    @StateObject private var history = ArchiveHistoryStore()
 
     var body: some Scene {
         WindowGroup("Фото с iPhone") {
@@ -13,8 +14,16 @@ struct LocalPhotosSyncApp: App {
                 LibraryView(store: store)
                     .disabled(exporter.isExporting)
                     .tabItem { Label("Импорт по USB", systemImage: "cable.connector") }
+                ArchiveHistoryView(history: history)
+                    .tabItem { Label("Архивы", systemImage: "archivebox") }
             }
             .frame(minWidth: 820, minHeight: 580)
+            .onChange(of: exporter.outputFolder) { _, folder in
+                if let folder { history.record(folder, source: .catalog) }
+            }
+            .onChange(of: store.importing) { _, importing in
+                if !importing, let folder = store.lastArchive { history.record(folder, source: .usbImport) }
+            }
         }
         .defaultSize(width: 1060, height: 760)
     }
@@ -67,5 +76,24 @@ private struct LibraryView: View {
             verifyArchive: { store.verifyArchiveFolder() },
             openArchive: { NSWorkspace.shared.open($0) },
             thumbnail: { await store.thumbnail(forID: $0) })
+    }
+}
+
+private struct ArchiveHistoryView: View {
+    @ObservedObject var history: ArchiveHistoryStore
+
+    var body: some View {
+        let history = history
+        ArchiveHistoryScreen(
+            records: history.records,
+            checks: history.checks,
+            isChecking: history.isChecking,
+            message: history.message,
+            actions: ArchiveHistoryActions(
+                verifyAll: { history.verifyAll() },
+                verify: { history.verify([$0]) },
+                addFolder: { history.addExistingFolder() },
+                reveal: { NSWorkspace.shared.activateFileViewerSelecting([$0]) },
+                remove: { history.remove($0) }))
     }
 }
