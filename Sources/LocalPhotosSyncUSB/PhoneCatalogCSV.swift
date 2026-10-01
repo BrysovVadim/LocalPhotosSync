@@ -4,6 +4,9 @@ import Foundation
 enum PhoneCatalogCSV {
     static let header = ["id", "filename", "type", "created", "category", "hidden", "last_check", "checked_bytes", "saved_this_session"]
 
+    /// UTF-8 byte order mark, so Excel recognises the encoding of non-ASCII file names.
+    static let byteOrderMark = "\u{FEFF}"
+
     static func make(assets: [PhoneCatalogAsset], checks: [Int64: PhoneAssetAvailabilityCheck],
                      saved: Set<Int64>, failed: Set<Int64>) -> String {
         let formatter = ISO8601DateFormatter()
@@ -40,7 +43,7 @@ enum PhoneCatalogCSV {
     /// RFC 4180 quoting; also neutralises leading formula characters so spreadsheets do not evaluate file names.
     static func escape(_ field: String) -> String {
         var value = field
-        if let first = value.first, "=+-@".contains(first) { value = "'" + value }
+        if let first = value.first, "=+-@\t\r".contains(first) { value = "'" + value }
         guard value.contains(where: { $0 == "," || $0 == "\"" || $0 == "\n" || $0 == "\r" }) else { return value }
         return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }

@@ -177,6 +177,9 @@ final class PhoneCatalogCSVTests: XCTestCase {
         XCTAssertEqual(lines[2], "2,\"a,\"\"b\"\".mov\",video,,other,yes,,,not_saved")
         XCTAssertEqual(lines[3], "3,'=cmd(),other,,unknown,no,,,")
         XCTAssertEqual(lines.count, 5, "Trailing CRLF after the last row")
+        XCTAssertEqual(PhoneCatalogCSV.escape("\tname"), "'\tname")
+        XCTAssertEqual(PhoneCatalogCSV.escape("-1"), "'-1")
+        XCTAssertEqual(PhoneCatalogCSV.byteOrderMark.unicodeScalars.first?.value, 0xFEFF)
     }
 }
 

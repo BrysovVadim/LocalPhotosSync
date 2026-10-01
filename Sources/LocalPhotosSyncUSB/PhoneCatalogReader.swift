@@ -337,7 +337,7 @@ final class PhoneCatalogReader: ObservableObject {
 
     private let buildDirectory: URL?
     /// Missing setup that prevents refreshing from the phone; computed once, nil for fixed snapshots.
-    let setupProblem: PhoneCatalogSetupProblem?
+    @Published private(set) var setupProblem: PhoneCatalogSetupProblem?
 
     convenience init() {
         self.init(buildDirectory: Self.findBuildDirectory())
@@ -404,6 +404,7 @@ final class PhoneCatalogReader: ObservableObject {
     }
 
     func refresh() {
+        setupProblem = PhoneCatalogSetupProblem.detect(buildDirectory: buildDirectory)
         guard let buildDirectory else {
             errorMessage = "Не удалось найти каталог приложения для обновления."
             return

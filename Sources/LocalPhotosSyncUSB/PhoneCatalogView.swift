@@ -708,7 +708,7 @@ struct PhoneCatalogView: View {
         panel.allowedContentTypes = [.commaSeparatedText]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try Data(csv.utf8).write(to: url, options: .atomic)
+            try Data((PhoneCatalogCSV.byteOrderMark + csv).utf8).write(to: url, options: .atomic)
         } catch {
             NSAlert(error: error).runModal()
         }

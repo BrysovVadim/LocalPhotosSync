@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// One saved file of an archive as recorded in its report, with companion files from the same subfolder.
 struct ArchiveContentsEntry: Identifiable, Equatable {
@@ -36,7 +37,8 @@ enum ArchiveContents {
     /// Reads the file list from `import-report.json`; nil if the report is missing or unreadable.
     static func read(folder: URL) -> [ArchiveContentsEntry]? {
         let url = folder.appendingPathComponent("import-report.json")
-        guard let data = try? Data(contentsOf: url), data.count <= 32 * 1024 * 1024,
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 32 * 1024 * 1024,
+              let data = try? Data(contentsOf: url),
               let report = try? JSONDecoder().decode(Report.self, from: data) else { return nil }
         var companionsByFolder: [String: [ArchiveContentsEntry.Companion]] = [:]
         for item in report.companionFiles ?? [] where isSafeRelative(item.path) {
@@ -56,23 +58,55 @@ enum ArchiveContents {
     static func isSafeRelative(_ path: String) -> Bool {
         !path.isEmpty && !path.hasPrefix("/") && !path.split(separator: "/").contains("..")
     }
+
+    /// The file a report entry points to, only if it really lies inside the archive after resolving symlinks.
+    static func resolve(_ relativePath: String, in folder: URL) -> URL? {
+        guard isSafeRelative(relativePath) else { return nil }
+        let root = folder.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let file = folder.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
+        return file.path.hasPrefix(root) ? file : nil
+    }
+
+    /// Only photos and videos are opened in their app; anything else is shown in Finder instead of being launched.
+    static func opensDirectly(_ url: URL) -> Bool {
+        guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
+        return type.conforms(to: .image) || type.conforms(to: .audiovisualContent)
+    }
 }
 
 /// Sheet listing what an archive folder contains, from its report.
 struct ArchiveContentsSheet: View {
     let folderName: String
-    let entries: [ArchiveContentsEntry]?
+    /// When set, the report is read from this folder once, off the main thread.
+    let folder: URL?
     let open: (String) -> Void
     let reveal: (String) -> Void
     let close: () -> Void
+    @State private var entries: [ArchiveContentsEntry]?
+    @State private var isLoading: Bool
 
+    /// Shows entries that are already known (used for rendering checks).
     init(folderName: String, entries: [ArchiveContentsEntry]?, open: @escaping (String) -> Void,
          reveal: @escaping (String) -> Void, close: @escaping () -> Void) {
         self.folderName = folderName
-        self.entries = entries
+        folder = nil
         self.open = open
         self.reveal = reveal
         self.close = close
+        _entries = State(initialValue: entries)
+        _isLoading = State(initialValue: false)
+    }
+
+    /// Reads the folder's report in the background when the sheet appears.
+    init(folderName: String, folder: URL, open: @escaping (String) -> Void,
+         reveal: @escaping (String) -> Void, close: @escaping () -> Void) {
+        self.folderName = folderName
+        self.folder = folder
+        self.open = open
+        self.reveal = reveal
+        self.close = close
+        _entries = State(initialValue: nil)
+        _isLoading = State(initialValue: true)
     }
 
     var body: some View {
@@ -83,7 +117,9 @@ struct ArchiveContentsSheet: View {
             }
             .padding(16)
             Divider()
-            if let entries, !entries.isEmpty {
+            if isLoading {
+                ProgressView("Читаем отчёт…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let entries, !entries.isEmpty {
                 List(entries) { entry in
                     row(entry)
                 }
@@ -104,9 +140,15 @@ struct ArchiveContentsSheet: View {
             .padding(12)
         }
         .frame(width: 620, height: 460)
+        .task {
+            guard let folder, isLoading else { return }
+            entries = await Task.detached(priority: .userInitiated) { ArchiveContents.read(folder: folder) }.value
+            isLoading = false
+        }
     }
 
     private var summary: String {
+        if isLoading { return "Чтение отчёта…" }
         guard let entries else { return "Отчёт не прочитан" }
         let bytes = entries.reduce(Int64(0)) { $0 + $1.bytes + $1.companions.reduce(0) { $0 + $1.bytes } }
         let companions = entries.reduce(0) { $0 + $1.companions.count }

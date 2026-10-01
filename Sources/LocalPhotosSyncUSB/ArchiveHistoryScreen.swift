@@ -121,9 +121,14 @@ struct ArchiveHistoryScreen: View {
         .sheet(item: $contentsRecord) { record in
             ArchiveContentsSheet(
                 folderName: record.name,
-                entries: ArchiveContents.read(folder: record.url),
-                open: { actions.openFile(record.url.appendingPathComponent($0)) },
-                reveal: { actions.reveal(record.url.appendingPathComponent($0)) },
+                folder: record.url,
+                open: { path in
+                    guard let url = ArchiveContents.resolve(path, in: record.url) else { return }
+                    if ArchiveContents.opensDirectly(url) { actions.openFile(url) } else { actions.reveal(url) }
+                },
+                reveal: { path in
+                    if let url = ArchiveContents.resolve(path, in: record.url) { actions.reveal(url) }
+                },
                 close: { contentsRecord = nil })
         }
         .dropDestination(for: URL.self) { urls, _ in

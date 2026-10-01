@@ -467,3 +467,30 @@ final class ArchiveContentsRenderTests: XCTestCase {
             .write(to: output.appendingPathComponent("archive-contents.png"))
     }
 }
+
+final class ArchiveContentsSafetyTests: XCTestCase {
+    func testResolveRejectsSymlinksLeavingTheArchive() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let archive = root.appendingPathComponent("archive", isDirectory: true)
+        let outside = root.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: archive.appendingPathComponent("00001"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("x".utf8).write(to: archive.appendingPathComponent("00001/IMG.HEIC"))
+        try Data("y".utf8).write(to: outside.appendingPathComponent("Tool.command"))
+        try FileManager.default.createSymbolicLink(at: archive.appendingPathComponent("00002"), withDestinationURL: outside)
+
+        XCTAssertNotNil(ArchiveContents.resolve("00001/IMG.HEIC", in: archive))
+        XCTAssertNil(ArchiveContents.resolve("00002/Tool.command", in: archive), "A symlinked subfolder must not escape")
+        XCTAssertNil(ArchiveContents.resolve("../outside/Tool.command", in: archive))
+    }
+
+    func testOnlyPhotosAndVideosOpenDirectly() {
+        XCTAssertTrue(ArchiveContents.opensDirectly(URL(fileURLWithPath: "/a/IMG.HEIC")))
+        XCTAssertTrue(ArchiveContents.opensDirectly(URL(fileURLWithPath: "/a/IMG.JPG")))
+        XCTAssertTrue(ArchiveContents.opensDirectly(URL(fileURLWithPath: "/a/IMG.MOV")))
+        XCTAssertFalse(ArchiveContents.opensDirectly(URL(fileURLWithPath: "/a/Tool.command")))
+        XCTAssertFalse(ArchiveContents.opensDirectly(URL(fileURLWithPath: "/a/Evil.app")))
+        XCTAssertFalse(ArchiveContents.opensDirectly(URL(fileURLWithPath: "/a/report.json")))
+    }
+}
