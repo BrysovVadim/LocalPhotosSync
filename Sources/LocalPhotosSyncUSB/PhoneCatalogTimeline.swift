@@ -45,13 +45,18 @@ enum PhoneCatalogTimeline {
 
     /// Sections of one page: consecutive assets of the same month, in display order.
     static func sections(of pageAssets: [PhoneCatalogAsset], calendar: Calendar = .current) -> [(month: Date?, assets: [PhoneCatalogAsset])] {
-        var sections: [(month: Date?, assets: [PhoneCatalogAsset])] = []
-        for asset in pageAssets {
-            let start = asset.createdAt.map { monthStart($0, calendar: calendar) }
+        sections(of: pageAssets, date: \.createdAt, calendar: calendar).map { ($0.month, $0.items) }
+    }
+
+    /// Consecutive items of the same month, for any list that carries an optional date.
+    static func sections<Item>(of items: [Item], date: (Item) -> Date?, calendar: Calendar = .current) -> [(month: Date?, items: [Item])] {
+        var sections: [(month: Date?, items: [Item])] = []
+        for item in items {
+            let start = date(item).map { monthStart($0, calendar: calendar) }
             if let last = sections.last, last.month == start {
-                sections[sections.count - 1].assets.append(asset)
+                sections[sections.count - 1].items.append(item)
             } else {
-                sections.append((start, [asset]))
+                sections.append((start, [item]))
             }
         }
         return sections

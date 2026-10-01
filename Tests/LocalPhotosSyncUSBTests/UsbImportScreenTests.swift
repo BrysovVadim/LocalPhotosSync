@@ -26,6 +26,24 @@ final class UsbImportScreenTests: XCTestCase {
         XCTAssertEqual(UsbImportFiltering.selectedBytes(items, selected: []), 0)
     }
 
+    func testShiftClickRangeIsInclusiveInEitherDirection() {
+        let items = UsbImportFixtures.items(count: 8)
+        XCTAssertEqual(UsbImportFiltering.range(in: items, from: "item-2", to: "item-5"), ["item-2", "item-3", "item-4", "item-5"])
+        XCTAssertEqual(UsbImportFiltering.range(in: items, from: "item-5", to: "item-2"), ["item-2", "item-3", "item-4", "item-5"])
+        XCTAssertEqual(UsbImportFiltering.range(in: items, from: "item-3", to: "item-3"), ["item-3"])
+        XCTAssertNil(UsbImportFiltering.range(in: items, from: "missing", to: "item-3"))
+    }
+
+    func testGenericMonthSectionsGroupUsbItems() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let items = UsbImportFixtures.items(count: 40)
+        let sections = PhoneCatalogTimeline.sections(of: items, date: { $0.date }, calendar: calendar)
+        XCTAssertEqual(sections.map { $0.items.count }.reduce(0, +), 40)
+        XCTAssertGreaterThan(sections.count, 1, "Forty daily items span more than one month")
+        XCTAssertEqual(sections.flatMap { $0.items.map(\.id) }, items.map(\.id), "Order is preserved")
+    }
+
     func testStatusSummaryCollapsesLongReports() {
         XCTAssertEqual(StatusText.summary(of: "Одна строка").headline, "Одна строка")
         XCTAssertFalse(StatusText.summary(of: "a\nb\nc").isTruncated)

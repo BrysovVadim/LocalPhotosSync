@@ -35,6 +35,13 @@ enum UsbImportFiltering {
         }
     }
 
+    /// Shift-click: ids between `anchor` and `target` (inclusive) in display order, or nil if either is not shown.
+    static func range(in items: [UsbImportItem], from anchor: String, to target: String) -> [String]? {
+        guard let start = items.firstIndex(where: { $0.id == anchor }),
+              let end = items.firstIndex(where: { $0.id == target }) else { return nil }
+        return items[min(start, end)...max(start, end)].map(\.id)
+    }
+
     static func selectedBytes(_ items: [UsbImportItem], selected: Set<String>) -> Int64 {
         items.reduce(0) { selected.contains($1.id) ? $0 + max(0, $1.bytes) : $0 }
     }
@@ -78,6 +85,8 @@ struct UsbImportScreen: View {
     let actions: UsbImportActions
     @State private var query = ""
     @State private var filter = UsbImportTypeFilter.all
+    @State private var anchor: String?
+    @AppStorage("usb.tileSize") private var tileSize = PhoneCatalogTileSize.standard
 
     init(state: UsbImportScreenState, actions: UsbImportActions) {
         self.state = state
@@ -188,7 +197,7 @@ struct UsbImportScreen: View {
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 330)
+            .frame(width: 300)
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Поиск по имени файла", text: $query).textFieldStyle(.plain)
@@ -209,6 +218,26 @@ struct UsbImportScreen: View {
                 actions.setSelection(state.selected.union(visible.map(\.id)))
             }
             .disabled(!state.ready || visible.isEmpty || state.importing)
+            .help("Добавить к выбору все показанные файлы. Shift-щелчок по карточке выбирает диапазон от предыдущей.")
+            ControlGroup {
+                Button {
+                    if let size = PhoneCatalogTileSize.smaller(than: tileSize) { tileSize = size }
+                } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .keyboardShortcut("-", modifiers: .command)
+                .disabled(PhoneCatalogTileSize.smaller(than: tileSize) == nil)
+                .help("Мельче карточки (⌘−)")
+                Button {
+                    if let size = PhoneCatalogTileSize.larger(than: tileSize) { tileSize = size }
+                } label: {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                .keyboardShortcut("=", modifiers: .command)
+                .disabled(PhoneCatalogTileSize.larger(than: tileSize) == nil)
+                .help("Крупнее карточки (⌘=)")
+            }
+            .fixedSize()
         }
     }
 
@@ -234,15 +263,25 @@ struct UsbImportScreen: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .padding(.horizontal, 20)
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 12)], spacing: 12) {
-                        ForEach(visible) { item in
-                            UsbImportTile(item: item,
-                                          selected: state.selected.contains(item.id),
-                                          ready: state.ready,
-                                          thumbnail: actions.thumbnail) {
-                                var selection = state.selected
-                                if selection.contains(item.id) { selection.remove(item.id) } else { selection.insert(item.id) }
-                                actions.setSelection(selection)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: tileSize), spacing: 12)], spacing: 12,
+                              pinnedViews: [.sectionHeaders]) {
+                        ForEach(Array(PhoneCatalogTimeline.sections(of: visible, date: \.date).enumerated()), id: \.offset) { _, section in
+                            Section {
+                                ForEach(section.items) { item in
+                                    UsbImportTile(item: item,
+                                                  selected: state.selected.contains(item.id),
+                                                  ready: state.ready,
+                                                  thumbnailHeight: (tileSize * 0.8).rounded(),
+                                                  thumbnail: actions.thumbnail) {
+                                        handleClick(item, visible: visible)
+                                    }
+                                }
+                            } header: {
+                                Text(PhoneCatalogTimeline.title(for: section.month))
+                                    .font(.headline)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.vertical, 6)
+                                    .background(Color(nsColor: .windowBackgroundColor))
                             }
                         }
                     }
@@ -292,6 +331,21 @@ struct UsbImportScreen: View {
                     .disabled(state.connectedID.isEmpty)
             }
         }
+    }
+
+    /// A plain click toggles one file; Shift-click adds every shown file between the previous click and this one.
+    private func handleClick(_ item: UsbImportItem, visible: [UsbImportItem]) {
+        var selection = state.selected
+        if NSEvent.modifierFlags.contains(.shift), let previous = anchor, previous != item.id,
+           let range = UsbImportFiltering.range(in: visible, from: previous, to: item.id) {
+            selection.formUnion(range)
+        } else if selection.contains(item.id) {
+            selection.remove(item.id)
+        } else {
+            selection.insert(item.id)
+        }
+        anchor = item.id
+        actions.setSelection(selection)
     }
 
     // MARK: - Action bar
@@ -377,6 +431,7 @@ private struct UsbImportTile: View {
     let item: UsbImportItem
     let selected: Bool
     let ready: Bool
+    let thumbnailHeight: CGFloat
     let thumbnail: @MainActor (String) async -> NSImage?
     let toggle: () -> Void
     @State private var image: NSImage?
@@ -386,7 +441,7 @@ private struct UsbImportTile: View {
             VStack(alignment: .leading, spacing: 5) {
                 Color.secondary.opacity(0.1)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 130)
+                    .frame(height: thumbnailHeight)
                     .overlay {
                         if let image {
                             Image(nsImage: image).resizable().scaledToFill()
