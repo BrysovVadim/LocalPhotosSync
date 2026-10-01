@@ -27,6 +27,19 @@ final class PhoneCatalogViewRenderTests: XCTestCase {
             try png.write(to: output.appendingPathComponent("\(item.name).png"))
         }
 
+        // Drive the real exporter through a stubbed availability probe so follow-up actions appear.
+        let checkedIDs = Array(ids.prefix(6))
+        let exporter = PhoneAssetExporter(availabilityProbeRunner: { assetID, _, _, _ in
+            assetID % 3 == 0 ? .mainFileMissing : .mainFileReadable(bytes: 2_400_000)
+        })
+        exporter.checkAvailability(assets: snapshot.assets.filter { checkedIDs.contains($0.id) }, snapshot: snapshot)
+        for _ in 0..<300 where exporter.isExporting { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        XCTAssertFalse(exporter.isExporting)
+        let checked = PhoneCatalogView(exporter: exporter, reader: PhoneCatalogReader(fixedSnapshot: snapshot),
+                                       selected: Set(checkedIDs))
+        try ScreenRenderer.render(checked, size: CGSize(width: 1060, height: 760))
+            .write(to: output.appendingPathComponent("catalog-after-check.png"))
+
         let defaults = UserDefaults.standard
         let previousSize = defaults.object(forKey: "catalog.tileSize")
         defaults.set(PhoneCatalogTileSize.steps.last, forKey: "catalog.tileSize")

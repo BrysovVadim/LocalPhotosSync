@@ -9,6 +9,7 @@ struct PhoneCatalogView: View {
     @AppStorage("catalog.tileSize") private var tileSize = PhoneCatalogTileSize.standard
     @Environment(\.isEnabled) private var isEnabled
     @State private var selectionAnchor: Int64?
+    @State private var showOnlySelected = false
     @State private var category = PhoneCatalogCategory.mediaLibrary
     @State private var type = PhoneCatalogTypeFilter.all
     @State private var search = ""
@@ -27,7 +28,12 @@ struct PhoneCatalogView: View {
     }
 
     private var visibleAssets: [PhoneCatalogAsset] {
-        reader.snapshot?.assets(category: category, type: type, search: search) ?? []
+        reader.snapshot.map { filteredAssets(in: $0) } ?? []
+    }
+
+    private func filteredAssets(in snapshot: PhoneCatalogSnapshot) -> [PhoneCatalogAsset] {
+        let assets = snapshot.assets(category: category, type: type, search: search)
+        return showOnlySelected ? assets.filter { selected.contains($0.id) } : assets
     }
 
     private var currentPageAssets: [PhoneCatalogAsset] {
@@ -73,6 +79,10 @@ struct PhoneCatalogView: View {
         .onChange(of: type) { _, _ in page = 0; selectionAnchor = nil; thumbnails.supersede() }
         .onChange(of: search) { _, _ in page = 0; selectionAnchor = nil; thumbnails.supersede() }
         .onChange(of: page) { _, _ in thumbnails.supersede() }
+        .onChange(of: selected) { _, selection in
+            if selection.isEmpty { showOnlySelected = false }
+        }
+        .onChange(of: showOnlySelected) { _, _ in page = 0; selectionAnchor = nil }
         .onChange(of: reader.snapshot?.sourceFolder) { _, _ in
             page = 0
             selected.removeAll()
@@ -157,7 +167,7 @@ struct PhoneCatalogView: View {
 
     @ViewBuilder
     private func catalog(_ snapshot: PhoneCatalogSnapshot) -> some View {
-        let visible = snapshot.assets(category: category, type: type, search: search)
+        let visible = filteredAssets(in: snapshot)
         let pageCount = PhoneCatalogPaging.pageCount(total: visible.count, pageSize: pageSize)
         let currentPage = PhoneCatalogPaging.clamp(page, total: visible.count, pageSize: pageSize)
         let pageAssets = PhoneCatalogPaging.page(visible, index: currentPage, pageSize: pageSize)
@@ -356,9 +366,14 @@ struct PhoneCatalogView: View {
                            actions: PhoneCatalogActionState) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Text(selectionSummary(actions.selectedCount))
-                    .font(.callout.weight(.medium).monospacedDigit())
-                    .foregroundStyle(actions.selectedCount > PhoneCatalogActionState.selectionLimit ? Color.orange : Color.primary)
+                Toggle(isOn: $showOnlySelected) {
+                    Text(selectionSummary(actions.selectedCount))
+                        .font(.callout.weight(.medium).monospacedDigit())
+                        .foregroundStyle(actions.selectedCount > PhoneCatalogActionState.selectionLimit ? Color.orange : Color.primary)
+                }
+                .toggleStyle(.button)
+                .disabled(selected.isEmpty && !showOnlySelected)
+                .help(showOnlySelected ? "Показаны только выбранные карточки. Нажмите, чтобы вернуть все." : "Показать только выбранные карточки, со всех страниц.")
                 Button("Снять выбор") { selected.removeAll(); selectionAnchor = nil }
                     .disabled(selected.isEmpty || exporter.isExporting)
                 Spacer(minLength: 8)
@@ -399,8 +414,34 @@ struct PhoneCatalogView: View {
             ForEach(statusLines(actions: actions)) { line in
                 StatusMessageRow(symbol: line.symbol, text: line.text, tone: line.tone)
             }
+            followUpButtons(snapshot: snapshot)
             Text("За раз: до \(PhoneCatalogActionState.selectionLimit) файлов, каждый до 32 МБ; Live Photo — одно фото с видео. Полнота оригиналов и данных правок пока не подтверждена.")
                 .font(.caption2).foregroundStyle(.tertiary)
+        }
+    }
+
+    @ViewBuilder
+    private func followUpButtons(snapshot: PhoneCatalogSnapshot) -> some View {
+        let followUps = PhoneCatalogFollowUps(
+            selection: selected, checks: exporter.availabilityResults, checksFolder: exporter.availabilitySourceFolder,
+            failed: exporter.failedAssetIDs, exportFolder: exporter.sourceFolder, snapshot: snapshot, isBusy: isBusy)
+        if !followUps.notReadable.isEmpty || !followUps.unsaved.isEmpty {
+            HStack(spacing: 8) {
+                if !followUps.notReadable.isEmpty {
+                    Button("Убрать недоступные (\(followUps.notReadable.count))") {
+                        selected.subtract(followUps.notReadable)
+                    }
+                    .help("Снять выбор с карточек, у которых последняя проверка не нашла файл, нашла его слишком большим или завершилась ошибкой. Непроверенные остаются.")
+                }
+                if !followUps.unsaved.isEmpty && followUps.unsaved != selected {
+                    Button("Выбрать несохранённые (\(followUps.unsaved.count))") {
+                        selected = followUps.unsaved
+                        selectionAnchor = nil
+                    }
+                    .help("Заменить выбор файлами последнего переноса, которые не сохранились, чтобы повторить попытку.")
+                }
+            }
+            .controlSize(.small)
         }
     }
 
@@ -609,7 +650,7 @@ struct PhoneCatalogView: View {
 
     /// Everything that can make an automatic preview load possible or necessary.
     private var autoLoadKey: String {
-        [String(page), category.rawValue, type.rawValue, search, String(autoLoadPreviews), String(isEnabled),
+        [String(page), category.rawValue, type.rawValue, search, String(showOnlySelected), String(autoLoadPreviews), String(isEnabled),
          String(thumbnails.isLoading), String(exporter.isExporting), String(reader.isRefreshing),
          String(reader.isLoadingSnapshot), reader.snapshot?.sourceFolder.path ?? ""].joined(separator: "|")
     }

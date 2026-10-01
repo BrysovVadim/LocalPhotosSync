@@ -84,6 +84,33 @@ final class PhoneCatalogActionsTests: XCTestCase {
         XCTAssertEqual(PhoneCatalogSelection.addingRange(in: mixed, from: 1, to: 4, to: [], limit: 12), [1, 4])
     }
 
+    func testFollowUpsAfterCheckAndTransfer() {
+        let folder = URL(fileURLWithPath: "/snapshot-a")
+        let other = URL(fileURLWithPath: "/snapshot-b")
+        let assets = (Int64(1)...6).map { asset($0) } + [asset(7, hidden: true)]
+        let snapshot = PhoneCatalogSnapshot(assets: assets, snapshotDate: Date(), sourceFolder: folder)
+        let now = Date()
+        let checks: [Int64: PhoneAssetAvailabilityCheck] = [
+            1: PhoneAssetAvailabilityCheck(state: .mainFileReadable(bytes: 10), sourceFolder: folder, checkedAt: now),
+            2: PhoneAssetAvailabilityCheck(state: .mainFileMissing, sourceFolder: folder, checkedAt: now),
+            3: PhoneAssetAvailabilityCheck(state: .exceedsCopyLimit(bytes: 99), sourceFolder: folder, checkedAt: now),
+            4: PhoneAssetAvailabilityCheck(state: .failed, sourceFolder: folder, checkedAt: now),
+            5: PhoneAssetAvailabilityCheck(state: .mainFileMissing, sourceFolder: other, checkedAt: now),
+        ]
+        let followUps = PhoneCatalogFollowUps(selection: [1, 2, 3, 4, 5, 6], checks: checks, checksFolder: folder,
+                                              failed: [2, 6, 7], exportFolder: folder, snapshot: snapshot, isBusy: false)
+        XCTAssertEqual(followUps.notReadable, [2, 3, 4], "Unchecked and other-snapshot results are kept")
+        XCTAssertEqual(followUps.unsaved, [2, 6], "Non-transferable failures are not offered")
+
+        let stale = PhoneCatalogFollowUps(selection: [2], checks: checks, checksFolder: other,
+                                          failed: [2], exportFolder: other, snapshot: snapshot, isBusy: false)
+        XCTAssertTrue(stale.notReadable.isEmpty && stale.unsaved.isEmpty)
+
+        let busy = PhoneCatalogFollowUps(selection: [2], checks: checks, checksFolder: folder,
+                                         failed: [2], exportFolder: folder, snapshot: snapshot, isBusy: true)
+        XCTAssertTrue(busy.notReadable.isEmpty && busy.unsaved.isEmpty)
+    }
+
     func testTileSizeSteps() {
         XCTAssertEqual(PhoneCatalogTileSize.smaller(than: 168), 132)
         XCTAssertNil(PhoneCatalogTileSize.smaller(than: 132))

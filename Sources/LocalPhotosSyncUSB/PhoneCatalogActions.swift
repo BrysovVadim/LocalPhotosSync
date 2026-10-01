@@ -48,6 +48,39 @@ enum PhoneCatalogSelection {
     }
 }
 
+/// Follow-up actions offered after a check or a transfer, computed from the current selection and results.
+struct PhoneCatalogFollowUps: Equatable {
+    /// Selected cards whose last check (for this snapshot) found the main file missing, too large or unreadable.
+    let notReadable: Set<Int64>
+    /// Cards of the last transfer from this snapshot that were not saved and can be selected again.
+    let unsaved: Set<Int64>
+
+    init(selection: Set<Int64>, checks: [Int64: PhoneAssetAvailabilityCheck], checksFolder: URL?,
+         failed: Set<Int64>, exportFolder: URL?, snapshot: PhoneCatalogSnapshot, isBusy: Bool) {
+        guard !isBusy else {
+            notReadable = []
+            unsaved = []
+            return
+        }
+        if checksFolder == snapshot.sourceFolder {
+            notReadable = Set(selection.filter { id in
+                guard let check = checks[id], check.sourceFolder == snapshot.sourceFolder else { return false }
+                if case .mainFileReadable = check.state { return false }
+                return true
+            })
+        } else {
+            notReadable = []
+        }
+        if exportFolder == snapshot.sourceFolder {
+            let transferable = Set(snapshot.assets.lazy.filter(\.isTransferable).map(\.id))
+            let candidates = failed.intersection(transferable)
+            unsaved = candidates.count <= PhoneCatalogActionState.selectionLimit ? candidates : []
+        } else {
+            unsaved = []
+        }
+    }
+}
+
 /// Card sizes for the catalog grid, smallest first.
 enum PhoneCatalogTileSize {
     static let steps: [Double] = [132, 168, 224]
