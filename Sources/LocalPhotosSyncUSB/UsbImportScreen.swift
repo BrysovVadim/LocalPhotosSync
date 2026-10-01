@@ -451,45 +451,11 @@ private struct UsbImportTile: View {
     var body: some View {
         Button(action: toggle) {
             VStack(alignment: .leading, spacing: 5) {
-                Color.secondary.opacity(0.1)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: thumbnailHeight)
-                    .overlay {
-                        if let image {
-                            Image(nsImage: image).resizable().scaledToFill()
-                        } else {
-                            Image(systemName: item.isVideo ? "video" : "photo")
-                                .font(.title).foregroundStyle(.secondary)
-                        }
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-                    .overlay(alignment: .topTrailing) {
-                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                            .font(.title2)
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, selected ? Color.accentColor : Color.black.opacity(0.18))
-                            .shadow(color: .black.opacity(selected ? 0 : 0.35), radius: 2)
-                            .padding(6)
-                    }
-                    .overlay(alignment: .bottomLeading) {
-                        if item.isVideo {
-                            Image(systemName: "video.fill")
-                                .font(.caption2)
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .background(Color.black.opacity(0.55), in: Capsule())
-                                .padding(6)
-                        }
-                    }
+                MediaThumbnail(image: image, isVideo: item.isVideo, height: thumbnailHeight, selected: selected)
                 Text(item.name).font(.callout).lineLimit(1).truncationMode(.middle)
                 Text(details).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
-            .padding(7)
-            .background(selected ? Color.accentColor.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10)
-                .stroke(selected ? Color.accentColor : Color.secondary.opacity(0.15), lineWidth: selected ? 2 : 1))
-            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .mediaTileChrome(selected: selected)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(item.name), \(details)")

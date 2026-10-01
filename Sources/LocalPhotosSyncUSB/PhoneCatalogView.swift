@@ -526,34 +526,9 @@ struct PhoneCatalogView: View {
             handleClick(asset)
         } label: {
             VStack(alignment: .leading, spacing: 5) {
-                thumbnail(for: asset)
-                    .overlay(alignment: .topTrailing) {
-                        if isSelected {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.title2)
-                                .symbolRenderingMode(.palette)
-                                .foregroundStyle(.white, Color.accentColor)
-                                .padding(6)
-                        } else if asset.isTransferable {
-                            Image(systemName: "circle")
-                                .font(.title2)
-                                .foregroundStyle(.white)
-                                .background(Circle().fill(Color.black.opacity(0.18)))
-                                .shadow(color: .black.opacity(0.35), radius: 2)
-                                .padding(6)
-                        }
-                    }
-                    .overlay(alignment: .bottomLeading) {
-                        if asset.mediaType == .video {
-                            Image(systemName: "video.fill")
-                                .font(.caption2)
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .background(Color.black.opacity(0.55), in: Capsule())
-                                .padding(6)
-                        }
-                    }
+                MediaThumbnail(image: thumbnails.images[asset.id], isVideo: asset.mediaType == .video,
+                               placeholderText: thumbnails.unavailable.contains(asset.id) ? "Превью недоступно" : "Без превью",
+                               height: (tileSize * 0.9).rounded(), selected: isSelected, selectable: asset.isTransferable)
                 Text(asset.filename.isEmpty ? "Имя файла не указано" : asset.filename)
                     .font(.callout).lineLimit(1).truncationMode(.middle)
                 Text(rowDetails(for: asset)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -576,12 +551,7 @@ struct PhoneCatalogView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }
-            .padding(7)
-            .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10)
-                .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.15), lineWidth: isSelected ? 2 : 1))
-            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .mediaTileChrome(selected: isSelected)
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -609,25 +579,6 @@ struct PhoneCatalogView: View {
         .disabled(exporter.isExporting || !asset.isTransferable)
         .accessibilityLabel("\(asset.filename), \(rowDetails(for: asset))")
         .accessibilityValue(isSelected ? "Выбрано" : "Не выбрано")
-    }
-
-    private func thumbnail(for asset: PhoneCatalogAsset) -> some View {
-        Color.secondary.opacity(0.1)
-            .frame(maxWidth: .infinity)
-            .frame(height: (tileSize * 0.9).rounded())
-            .overlay {
-                if let image = thumbnails.images[asset.id] {
-                    Image(nsImage: image).resizable().scaledToFill()
-                } else {
-                    VStack(spacing: 6) {
-                        Image(systemName: asset.mediaType == .video ? "video" : "photo").font(.title)
-                        Text(thumbnails.unavailable.contains(asset.id) ? "Превью недоступно" : "Без превью")
-                            .font(.caption)
-                    }
-                    .foregroundStyle(.secondary)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 7))
     }
 
     /// A plain click toggles one card; Shift-click adds the range from the previous click (within the limit).
