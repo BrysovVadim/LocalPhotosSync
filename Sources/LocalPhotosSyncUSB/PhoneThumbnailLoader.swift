@@ -68,6 +68,12 @@ final class PhoneThumbnailLoader: ObservableObject {
         lastBatchFailed = false
     }
 
+    /// Stops a running batch after its current item, e.g. when the user leaves the page; loaded previews stay cached.
+    func supersede() {
+        guard isLoading else { return }
+        generation += 1
+    }
+
     func canLoad(_ assets: [PhoneCatalogAsset]) -> Bool {
         assets.contains { ($0.mediaType == .photo || $0.mediaType == .video) && $0.isVisibleLibraryItem && !attempted.contains($0.id) }
     }
@@ -81,6 +87,7 @@ final class PhoneThumbnailLoader: ObservableObject {
         let folder = snapshot.sourceFolder
         guard FileManager.default.fileExists(atPath: folder.appendingPathComponent("source-binding.bin").path) else {
             message = "Обновите каталог с iPhone, чтобы загрузить превью из того же телефона."
+            lastBatchFailed = true
             return
         }
         isLoading = true

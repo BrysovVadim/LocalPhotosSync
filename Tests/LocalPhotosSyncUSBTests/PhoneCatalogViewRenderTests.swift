@@ -37,7 +37,7 @@ final class PhoneCatalogViewRenderTests: XCTestCase {
             assets.append(PhoneCatalogAsset(
                 id: id,
                 filename: isVideo ? "IMG_\(4_200 + index).MOV" : "IMG_\(4_200 + index).HEIC",
-                createdAt: start.addingTimeInterval(TimeInterval(-index * 3_600)),
+                createdAt: start.addingTimeInterval(TimeInterval(-index * 129_600)),
                 mediaType: isVideo ? .video : .photo,
                 scope: .mediaLibrary,
                 isHidden: false,

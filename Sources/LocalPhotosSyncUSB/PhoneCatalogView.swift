@@ -6,6 +6,7 @@ struct PhoneCatalogView: View {
     @StateObject private var thumbnails = PhoneThumbnailLoader()
     @ObservedObject var exporter: PhoneAssetExporter
     @AppStorage("catalog.autoLoadPreviews") private var autoLoadPreviews = false
+    @Environment(\.isEnabled) private var isEnabled
     @State private var category = PhoneCatalogCategory.mediaLibrary
     @State private var type = PhoneCatalogTypeFilter.all
     @State private var search = ""
@@ -66,17 +67,19 @@ struct PhoneCatalogView: View {
             }
         }
         .frame(minWidth: 760, minHeight: 540)
-        .onChange(of: category) { _, _ in page = 0; autoLoadIfNeeded() }
-        .onChange(of: type) { _, _ in page = 0; autoLoadIfNeeded() }
-        .onChange(of: search) { _, _ in page = 0; autoLoadIfNeeded() }
-        .onChange(of: page) { _, _ in autoLoadIfNeeded() }
-        .onChange(of: autoLoadPreviews) { _, _ in autoLoadIfNeeded() }
-        .onChange(of: thumbnails.isLoading) { _, loading in if !loading { autoLoadIfNeeded() } }
-        .onChange(of: exporter.isExporting) { _, exporting in if !exporting { autoLoadIfNeeded() } }
+        .onChange(of: category) { _, _ in page = 0; thumbnails.supersede() }
+        .onChange(of: type) { _, _ in page = 0; thumbnails.supersede() }
+        .onChange(of: search) { _, _ in page = 0; thumbnails.supersede() }
+        .onChange(of: page) { _, _ in thumbnails.supersede() }
         .onChange(of: reader.snapshot?.sourceFolder) { _, _ in
             page = 0
             selected.removeAll()
             thumbnails.reset()
+        }
+        .task(id: autoLoadKey) {
+            // One debounced trigger: typing, fast paging and batch hand-offs coalesce into a single load.
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
             autoLoadIfNeeded()
         }
     }
@@ -157,9 +160,10 @@ struct PhoneCatalogView: View {
         let pageAssets = PhoneCatalogPaging.page(visible, index: currentPage, pageSize: pageSize)
         let selectedAssets = snapshot.assets.filter { selected.contains($0.id) }
         let actions = PhoneCatalogActionState(selected: selectedAssets, busy: isBusy)
+        let months = PhoneCatalogTimeline.months(of: visible)
 
         VStack(alignment: .leading, spacing: 8) {
-            filterBar
+            filterBar(months: months, pageAssets: pageAssets)
             Text(categoryNote)
                 .font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }
@@ -167,8 +171,19 @@ struct PhoneCatalogView: View {
         .padding(.bottom, 10)
 
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 168), spacing: 12)], spacing: 12) {
-                ForEach(pageAssets) { asset in card(for: asset, snapshot: snapshot) }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 168), spacing: 12)], spacing: 12,
+                      pinnedViews: [.sectionHeaders]) {
+                ForEach(Array(PhoneCatalogTimeline.sections(of: pageAssets).enumerated()), id: \.offset) { _, section in
+                    Section {
+                        ForEach(section.assets) { asset in card(for: asset, snapshot: snapshot) }
+                    } header: {
+                        Text(PhoneCatalogTimeline.title(for: section.month))
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 6)
+                            .background(Color(nsColor: .windowBackgroundColor))
+                    }
+                }
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 4)
@@ -192,7 +207,7 @@ struct PhoneCatalogView: View {
             .background(.bar)
     }
 
-    private var filterBar: some View {
+    private func filterBar(months: [PhoneCatalogMonth], pageAssets: [PhoneCatalogAsset]) -> some View {
         HStack(spacing: 12) {
             Picker("Категория", selection: $category) {
                 ForEach(PhoneCatalogCategory.allCases) { item in Text(item.rawValue).tag(item) }
@@ -222,7 +237,24 @@ struct PhoneCatalogView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+            Menu {
+                ForEach(months, id: \.firstIndex) { month in
+                    Button("\(PhoneCatalogTimeline.title(for: month.start)) · \(month.count)") {
+                        page = PhoneCatalogTimeline.page(containing: month.firstIndex, pageSize: pageSize)
+                    }
+                }
+            } label: {
+                Label(currentMonthTitle(pageAssets), systemImage: "calendar")
+            }
+            .fixedSize()
+            .disabled(months.count < 2)
+            .help("Перейти к месяцу. Число — записей за месяц с учётом категории, типа и поиска.")
         }
+    }
+
+    private func currentMonthTitle(_ pageAssets: [PhoneCatalogAsset]) -> String {
+        guard let first = pageAssets.first else { return "Месяц" }
+        return PhoneCatalogTimeline.title(for: first.createdAt.map { PhoneCatalogTimeline.monthStart($0, calendar: .current) })
     }
 
     private var emptyResults: some View {
@@ -311,7 +343,6 @@ struct PhoneCatalogView: View {
                 if exporter.isExporting {
                     ProgressView().controlSize(.small)
                     Button("Остановить", role: .cancel) { exporter.cancel() }
-                        .keyboardShortcut(.cancelAction)
                 } else if let folder = exporter.outputFolder {
                     Button {
                         NSWorkspace.shared.open(folder)
@@ -542,8 +573,15 @@ struct PhoneCatalogView: View {
 
     // MARK: - Actions
 
+    /// Everything that can make an automatic preview load possible or necessary.
+    private var autoLoadKey: String {
+        [String(page), category.rawValue, type.rawValue, search, String(autoLoadPreviews), String(isEnabled),
+         String(thumbnails.isLoading), String(exporter.isExporting), String(reader.isRefreshing),
+         String(reader.isLoadingSnapshot), reader.snapshot?.sourceFolder.path ?? ""].joined(separator: "|")
+    }
+
     private func autoLoadIfNeeded() {
-        guard autoLoadPreviews, !thumbnails.lastBatchFailed, !isBusy, let snapshot = reader.snapshot else { return }
+        guard autoLoadPreviews, isEnabled, !thumbnails.lastBatchFailed, !isBusy, let snapshot = reader.snapshot else { return }
         let assets = currentPageAssets
         guard thumbnails.canLoad(assets) else { return }
         thumbnails.load(assets, snapshot: snapshot)

@@ -466,6 +466,7 @@ final class CameraStore: NSObject, ObservableObject, @preconcurrency ICDeviceBro
         catch {
             results = "Не удалось создать папку: \(error.localizedDescription)"
             lastImportSucceeded = false
+            lastArchive = nil
             return nil
         }
         importing = true

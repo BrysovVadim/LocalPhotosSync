@@ -312,7 +312,6 @@ struct UsbImportScreen: View {
                     Text("\(state.importProcessed) из \(state.importTotal)")
                         .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                     Button("Отменить перенос", role: .cancel) { actions.cancelImport() }
-                        .keyboardShortcut(.cancelAction)
                 } else if let archive = state.lastArchive {
                     Button {
                         actions.openArchive(archive)
