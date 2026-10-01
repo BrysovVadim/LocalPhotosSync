@@ -165,3 +165,22 @@ private extension String {
         unicodeScalars.reduce(UInt(5381)) { ($0 &* 33) &+ UInt($1.value) }
     }
 }
+
+final class HelpContentTests: XCTestCase {
+    func testTopicsAreUniqueAndNonEmpty() {
+        let ids = HelpContent.topics.map(\.id)
+        XCTAssertEqual(Set(ids).count, ids.count)
+        XCTAssertTrue(HelpContent.topics.allSatisfy { !$0.paragraphs.isEmpty && !$0.title.isEmpty })
+        XCTAssertTrue(HelpContent.topics.contains { $0.id == "limits" }, "Limitations stay visible in the app")
+    }
+}
+
+/// Renders the Help window for visual review (needs `LPS_RENDER_DIR`).
+@MainActor
+final class HelpRenderTests: XCTestCase {
+    func testRendersHelp() throws {
+        let output = try ScreenRenderer.outputDirectory()
+        try ScreenRenderer.render(HelpView(), size: CGSize(width: 720, height: 480))
+            .write(to: output.appendingPathComponent("help.png"))
+    }
+}

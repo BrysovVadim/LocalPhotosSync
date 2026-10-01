@@ -19,9 +19,16 @@ struct LocalPhotosSyncApp: App {
                 }
         }
         .defaultSize(width: 1060, height: 760)
+        .commands {
+            CommandGroup(replacing: .help) { HelpMenuItem() }
+        }
         Settings {
             SettingsView()
         }
+        Window("Справка", id: "help") {
+            HelpView()
+        }
+        .defaultSize(width: 720, height: 480)
     }
 }
 
@@ -122,5 +129,14 @@ private struct ArchiveHistoryView: View {
                 openReport: { NSWorkspace.shared.open($0) },
                 remove: { history.remove($0) }))
         .onAppear { history.loadSummaries() }
+    }
+}
+
+private struct HelpMenuItem: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Справка LocalPhotosSync") { openWindow(id: "help") }
+            .keyboardShortcut("?", modifiers: .command)
     }
 }

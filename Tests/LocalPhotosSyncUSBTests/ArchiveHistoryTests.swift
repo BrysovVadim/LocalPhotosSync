@@ -330,7 +330,7 @@ final class ArchiveStaleTests: XCTestCase {
 final class SettingsRenderTests: XCTestCase {
     func testRendersSettings() throws {
         let output = try ScreenRenderer.outputDirectory()
-        try ScreenRenderer.render(SettingsView(), size: CGSize(width: 480, height: 560))
+        try ScreenRenderer.render(SettingsView(), size: CGSize(width: 480, height: 700))
             .write(to: output.appendingPathComponent("settings.png"))
     }
 }
