@@ -111,7 +111,7 @@ struct PhoneCatalogView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Каталог iPhone").font(.title.bold())
                 if let snapshot = reader.snapshot {
-                    Text("Снимок от \(snapshot.snapshotDate.formatted(date: .abbreviated, time: .shortened)) · доступность оригиналов проверяется отдельно")
+                    Text("Снимок от \(snapshot.snapshotDate.formatted(date: .abbreviated, time: .shortened)). Оригиналы проверяются отдельно.")
                         .font(.callout).foregroundStyle(.secondary)
                 } else {
                     Text("Список фото и видео самого телефона по USB")
@@ -242,13 +242,13 @@ struct PhoneCatalogView: View {
                 ForEach(PhoneCatalogCategory.allCases) { item in Text(item.rawValue).tag(item) }
             }
             .labelsHidden()
-            .frame(width: 200)
+            .frame(width: 170)
             Picker("Тип", selection: $type) {
                 ForEach(PhoneCatalogTypeFilter.allCases) { item in Text(item.rawValue).tag(item) }
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 200)
+            .frame(width: 180)
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Поиск по имени файла", text: $search)
