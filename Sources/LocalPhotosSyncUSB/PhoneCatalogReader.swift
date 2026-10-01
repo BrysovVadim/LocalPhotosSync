@@ -295,6 +295,12 @@ final class PhoneCatalogReader: ObservableObject {
         self.init(buildDirectory: Self.findBuildDirectory())
     }
 
+    /// Shows a fixed snapshot without reading or refreshing the phone catalog; used for rendering checks.
+    init(fixedSnapshot: PhoneCatalogSnapshot) {
+        buildDirectory = nil
+        snapshot = fixedSnapshot
+    }
+
     init(buildDirectory: URL?) {
         self.buildDirectory = buildDirectory
         if buildDirectory != nil {

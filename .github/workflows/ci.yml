@@ -42,5 +42,14 @@ jobs:
         run: swift build -Xswiftc -warnings-as-errors
       - name: Tests
         run: swift test
+      - name: Render catalog screens
+        run: LPS_RENDER_DIR="$PWD/.build/screens" swift test --filter PhoneCatalogViewRenderTests
+      - name: Upload screens
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-screens
+          path: .build/screens/*.png
+          if-no-files-found: error
+          retention-days: 14
       - name: App bundle and signature
         run: zsh scripts/build-app.sh

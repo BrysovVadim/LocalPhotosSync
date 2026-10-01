@@ -2,226 +2,446 @@ import AppKit
 import SwiftUI
 
 struct PhoneCatalogView: View {
-    @StateObject private var reader = PhoneCatalogReader()
+    @StateObject private var reader: PhoneCatalogReader
     @StateObject private var thumbnails = PhoneThumbnailLoader()
     @ObservedObject var exporter: PhoneAssetExporter
+    @AppStorage("catalog.autoLoadPreviews") private var autoLoadPreviews = false
     @State private var category = PhoneCatalogCategory.mediaLibrary
     @State private var type = PhoneCatalogTypeFilter.all
     @State private var search = ""
-    @State private var selected: Set<Int64> = []
+    @State private var selected: Set<Int64>
     @State private var page = 0
     private let pageSize = 24
+
+    init(exporter: PhoneAssetExporter, reader: PhoneCatalogReader? = nil, selected: Set<Int64> = []) {
+        self.exporter = exporter
+        _reader = StateObject(wrappedValue: reader ?? PhoneCatalogReader())
+        _selected = State(initialValue: selected)
+    }
+
+    private var isBusy: Bool {
+        exporter.isExporting || thumbnails.isLoading || reader.isRefreshing || reader.isLoadingSnapshot
+    }
 
     private var visibleAssets: [PhoneCatalogAsset] {
         reader.snapshot?.assets(category: category, type: type, search: search) ?? []
     }
 
-    private var pageCount: Int { max(1, (visibleAssets.count + pageSize - 1) / pageSize) }
-    private var pageAssets: [PhoneCatalogAsset] {
-        Array(visibleAssets.dropFirst(min(page, pageCount - 1) * pageSize).prefix(pageSize))
-    }
-    private var selectedAssets: [PhoneCatalogAsset] {
-        reader.snapshot?.assets.filter { selected.contains($0.id) } ?? []
-    }
-    private var canExportLivePhoto: Bool {
-        selectedAssets.count == 1 && selectedAssets[0].isVisibleLibraryItem && selectedAssets[0].mediaType == .photo
+    private var currentPageAssets: [PhoneCatalogAsset] {
+        PhoneCatalogPaging.page(visibleAssets, index: page, pageSize: pageSize)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Каталог iPhone").font(.largeTitle.bold())
-                    Text("Каталог телефона; доступность оригиналов ещё не проверена")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    reader.refresh()
-                } label: {
-                    if reader.isRefreshing {
-                        ProgressView().controlSize(.small).padding(.trailing, 5)
-                        Text("Обновление…")
-                    } else {
-                        Label("Обновить с iPhone", systemImage: "arrow.clockwise")
-                    }
-                }
-                .disabled(reader.isRefreshing || reader.isLoadingSnapshot || thumbnails.isLoading || exporter.isExporting)
-            }
-
+        VStack(alignment: .leading, spacing: 0) {
+            header
+                .padding(.horizontal, 20)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
             if let error = reader.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if let snapshot = reader.snapshot {
-                let libraryCounts = snapshot.counts(in: .mediaLibrary)
-                let allCounts = snapshot.counts(in: .allRecords)
-                HStack(spacing: 12) {
-                    countCard(title: "Медиатека", detail: "Фото и видео", photos: libraryCounts.photos, videos: libraryCounts.videos)
-                    countCard(title: "Все записи", detail: "Без корзины; шире видимого списка", photos: allCounts.photos, videos: allCounts.videos)
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Снимок каталога").font(.caption).foregroundStyle(.secondary)
-                        Text(snapshot.snapshotDate.formatted(date: .abbreviated, time: .shortened))
-                            .font(.headline)
-                    }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-                    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
-                }
-
-                HStack(spacing: 12) {
-                    Picker("Категория", selection: $category) {
-                        ForEach(PhoneCatalogCategory.allCases) { item in Text(item.rawValue).tag(item) }
-                    }
-                    .frame(width: 230)
-                    Picker("Тип", selection: $type) {
-                        ForEach(PhoneCatalogTypeFilter.allCases) { item in Text(item.rawValue).tag(item) }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 240)
-                    TextField("Поиск по имени файла", text: $search)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                Text(categoryNote)
-                    .font(.caption).foregroundStyle(.secondary)
-
-                HStack {
-                    Button {
-                        thumbnails.load(pageAssets, snapshot: snapshot)
-                    } label: {
-                        Label(thumbnails.isLoading ? "Загрузка превью…" : "Загрузить превью", systemImage: "photo")
-                    }
-                    .disabled(thumbnails.isLoading || reader.isRefreshing || exporter.isExporting || !thumbnails.canLoad(pageAssets))
-                    Text("До 12 файлов за раз").font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Text("Выбрано: \(selected.count)").monospacedDigit()
-                    Button("Снять выбор") { selected.removeAll() }.disabled(selected.isEmpty || exporter.isExporting)
-                }
-                if let message = thumbnails.message {
-                    Text(message).font(.caption).foregroundStyle(.secondary)
-                }
-                HStack {
-                    Button {
-                        chooseExportFolder(for: snapshot)
-                    } label: {
-                        Label("Сохранить выбранные файлы…", systemImage: "square.and.arrow.down")
-                    }
-                    .disabled(selectedAssets.isEmpty || selectedAssets.count > 12 || exporter.isExporting || thumbnails.isLoading || reader.isRefreshing || reader.isLoadingSnapshot)
-                    Button("Сохранить Live Photo…") {
-                        chooseExportFolder(for: snapshot, livePhoto: true)
-                    }
-                    .disabled(!canExportLivePhoto || exporter.isExporting || thumbnails.isLoading || reader.isRefreshing || reader.isLoadingSnapshot)
-                    .help("Выберите одну Live Photo. Сохраняются доступные фото и видео неотредактированного снимка; каждый файл до 32 МБ.")
-                    if exporter.isExporting {
-                        Button("Остановить") { exporter.cancel() }
-                    }
-                    Spacer()
-                    if let folder = exporter.outputFolder {
-                        Button("Открыть папку") { NSWorkspace.shared.open(folder) }
-                    }
-                }
-                Text("Файлы: до 12, каждый до 32 МБ. Live Photo: один снимок вместе с его видео.")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button {
-                        exporter.checkAvailability(assets: selectedAssets, snapshot: snapshot)
-                    } label: {
-                        Label("Проверить файлы", systemImage: "magnifyingglass")
-                    }
-                    .disabled(selectedAssets.isEmpty || selectedAssets.count > 12 || exporter.isExporting || thumbnails.isLoading || reader.isRefreshing || reader.isLoadingSnapshot)
-                    Text("До 12 карточек. Для Live Photo проверяется фото; видео проверяется при переносе пары.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                }
-                if let message = exporter.availabilityMessage {
-                    Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                }
-                if let message = exporter.message {
-                    Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                }
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 175), spacing: 12)], spacing: 12) {
-                        ForEach(pageAssets) { asset in card(for: asset) }
-                    }
-                    .padding(2)
-                }
-                .overlay {
-                    if visibleAssets.isEmpty {
-                        ContentUnavailableView("Записей нет", systemImage: "photo.on.rectangle.angled")
-                    }
-                }
-                HStack {
-                    Button("Предыдущая") { page = max(0, page - 1) }.disabled(page == 0)
-                    Text("Страница \(min(page, pageCount - 1) + 1) из \(pageCount) · \(visibleAssets.count) записей")
-                        .font(.caption).monospacedDigit()
-                    Button("Следующая") { page = min(pageCount - 1, page + 1) }.disabled(page >= pageCount - 1)
-                    Spacer()
-                    Text("Полнота оригиналов и данных правок пока не подтверждена.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                    .padding(10)
+                    .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+            }
+            if let snapshot = reader.snapshot {
+                catalog(snapshot)
             } else if reader.isRefreshing || reader.isLoadingSnapshot {
                 ContentUnavailableView {
                     ProgressView()
                 } description: {
-                    Text("Читаем сохранённый каталог телефона.")
+                    Text(reader.isRefreshing ? String("Получаем каталог с iPhone…") : String("Читаем сохранённый каталог телефона."))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ContentUnavailableView {
                     Label("Каталог пока не загружен", systemImage: "iphone")
                 } description: {
-                    Text("Подключите iPhone и обновите каталог. Это чтение списка файлов и дат, без переноса фотографий.")
+                    Text("Подключите и разблокируйте iPhone, затем нажмите «Обновить с iPhone». Читается только список файлов и дат, фотографии не переносятся.")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .padding(20)
         .frame(minWidth: 760, minHeight: 540)
-        .onChange(of: category) { _, _ in page = 0 }
-        .onChange(of: type) { _, _ in page = 0 }
-        .onChange(of: search) { _, _ in page = 0 }
+        .onChange(of: category) { _, _ in page = 0; autoLoadIfNeeded() }
+        .onChange(of: type) { _, _ in page = 0; autoLoadIfNeeded() }
+        .onChange(of: search) { _, _ in page = 0; autoLoadIfNeeded() }
+        .onChange(of: page) { _, _ in autoLoadIfNeeded() }
+        .onChange(of: autoLoadPreviews) { _, _ in autoLoadIfNeeded() }
+        .onChange(of: thumbnails.isLoading) { _, loading in if !loading { autoLoadIfNeeded() } }
+        .onChange(of: exporter.isExporting) { _, exporting in if !exporting { autoLoadIfNeeded() } }
         .onChange(of: reader.snapshot?.sourceFolder) { _, _ in
             page = 0
             selected.removeAll()
             thumbnails.reset()
+            autoLoadIfNeeded()
         }
     }
 
-    private func card(for asset: PhoneCatalogAsset) -> some View {
-        Button {
-            if selected.contains(asset.id) { selected.remove(asset.id) } else { selected.insert(asset.id) }
-        } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                ZStack(alignment: .topTrailing) {
-                    RoundedRectangle(cornerRadius: 8).fill(.quaternary)
-                    if let image = thumbnails.images[asset.id] {
-                        Image(nsImage: image).resizable().scaledToFit().padding(3)
-                    } else {
-                        VStack(spacing: 7) {
-                            Image(systemName: asset.mediaType == .video ? "video" : "photo").font(.largeTitle)
-                            Text(thumbnails.unavailable.contains(asset.id) ? "Превью недоступно" : "Без превью")
-                                .font(.caption)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity).foregroundStyle(.secondary)
+    // MARK: - Header
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Каталог iPhone").font(.title.bold())
+                if let snapshot = reader.snapshot {
+                    Text("Снимок от \(snapshot.snapshotDate.formatted(date: .abbreviated, time: .shortened)) · доступность оригиналов проверяется отдельно")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else {
+                    Text("Список фото и видео самого телефона по USB")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 12)
+            if let snapshot = reader.snapshot {
+                statChip(.mediaLibrary, counts: snapshot.counts(in: .mediaLibrary))
+                statChip(.allRecords, counts: snapshot.counts(in: .allRecords))
+            }
+            Button {
+                reader.refresh()
+            } label: {
+                if reader.isRefreshing {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Обновление…")
                     }
-                    if selected.contains(asset.id) {
-                        Image(systemName: "checkmark.circle.fill").font(.title2)
-                            .foregroundStyle(.white, Color.accentColor).padding(6)
+                } else {
+                    Label("Обновить с iPhone", systemImage: "arrow.clockwise")
+                }
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            .help("Получить новый снимок каталога с подключённого iPhone (⌘R). Прежний каталог сохраняется при ошибке.")
+            .disabled(isBusy)
+        }
+    }
+
+    private func statChip(_ chipCategory: PhoneCatalogCategory, counts: (photos: Int, videos: Int)) -> some View {
+        let active = category == chipCategory
+        return Button {
+            category = chipCategory
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(chipCategory.rawValue).font(.caption).foregroundStyle(.secondary)
+                Text("\(counts.photos) фото · \(counts.videos) видео")
+                    .font(.callout.weight(.semibold).monospacedDigit())
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(active ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.08),
+                        in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8)
+                .stroke(active ? Color.accentColor.opacity(0.6) : Color.clear))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .help(chipHelp(chipCategory))
+        .accessibilityValue(active ? "Показано" : "")
+    }
+
+    private func chipHelp(_ chipCategory: PhoneCatalogCategory) -> String {
+        chipCategory == .mediaLibrary
+            ? "Основная видимая медиатека телефона. Нажмите, чтобы показать её."
+            : "Все записи без корзины, шире видимого списка. Нажмите, чтобы показать их."
+    }
+
+    // MARK: - Catalog
+
+    @ViewBuilder
+    private func catalog(_ snapshot: PhoneCatalogSnapshot) -> some View {
+        let visible = snapshot.assets(category: category, type: type, search: search)
+        let pageCount = PhoneCatalogPaging.pageCount(total: visible.count, pageSize: pageSize)
+        let currentPage = PhoneCatalogPaging.clamp(page, total: visible.count, pageSize: pageSize)
+        let pageAssets = PhoneCatalogPaging.page(visible, index: currentPage, pageSize: pageSize)
+        let selectedAssets = snapshot.assets.filter { selected.contains($0.id) }
+        let actions = PhoneCatalogActionState(selected: selectedAssets, busy: isBusy)
+
+        VStack(alignment: .leading, spacing: 8) {
+            filterBar
+            Text(categoryNote)
+                .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 10)
+
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 168), spacing: 12)], spacing: 12) {
+                ForEach(pageAssets) { asset in card(for: asset, snapshot: snapshot) }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 4)
+        }
+        .id("\(category.rawValue)-\(type.rawValue)-\(currentPage)")
+        .overlay {
+            if visible.isEmpty {
+                emptyResults
+            }
+        }
+
+        pageBar(pageAssets: pageAssets, snapshot: snapshot, currentPage: currentPage,
+                pageCount: pageCount, total: visible.count)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+
+        Divider()
+        actionBar(snapshot: snapshot, selectedAssets: selectedAssets, actions: actions)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(.bar)
+    }
+
+    private var filterBar: some View {
+        HStack(spacing: 12) {
+            Picker("Категория", selection: $category) {
+                ForEach(PhoneCatalogCategory.allCases) { item in Text(item.rawValue).tag(item) }
+            }
+            .labelsHidden()
+            .frame(width: 200)
+            Picker("Тип", selection: $type) {
+                ForEach(PhoneCatalogTypeFilter.allCases) { item in Text(item.rawValue).tag(item) }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 200)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Поиск по имени файла", text: $search)
+                    .textFieldStyle(.plain)
+                if !search.isEmpty {
+                    Button {
+                        search = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Очистить поиск")
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+        }
+    }
+
+    private var emptyResults: some View {
+        let title: String = search.isEmpty ? "Записей нет" : "Ничего не найдено"
+        let detail: String = search.isEmpty
+            ? "В этой категории и типе записей нет."
+            : "Нет файлов, имя которых содержит «\(search)»."
+        return ContentUnavailableView {
+            Label(title, systemImage: search.isEmpty ? "photo.on.rectangle.angled" : "magnifyingglass")
+        } description: {
+            Text(detail)
+        } actions: {
+            if !search.isEmpty || type != .all || category != .mediaLibrary {
+                Button("Сбросить фильтры") {
+                    search = ""
+                    type = .all
+                    category = .mediaLibrary
+                }
+            }
+        }
+    }
+
+    private func pageBar(pageAssets: [PhoneCatalogAsset], snapshot: PhoneCatalogSnapshot,
+                         currentPage: Int, pageCount: Int, total: Int) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                thumbnails.load(pageAssets, snapshot: snapshot)
+            } label: {
+                if thumbnails.isLoading {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Загрузка превью…")
+                    }
+                } else {
+                    Label("Загрузить превью", systemImage: "photo.on.rectangle")
+                }
+            }
+            .disabled(isBusy || !thumbnails.canLoad(pageAssets))
+            .help("Загружает превью этой страницы с iPhone, до 12 фото и видео за раз.")
+            Toggle("Автоматически", isOn: $autoLoadPreviews)
+                .toggleStyle(.checkbox)
+                .help("Загружать превью при открытии страницы. После ошибки подключения автозагрузка ждёт ручного повтора.")
+            Spacer(minLength: 8)
+            Button("Выбрать на странице") {
+                selected = PhoneCatalogSelection.adding(pageAssets, to: selected,
+                                                        limit: PhoneCatalogActionState.selectionLimit)
+            }
+            .disabled(exporter.isExporting || selected.count >= PhoneCatalogActionState.selectionLimit ||
+                      !pageAssets.contains { $0.isTransferable && !selected.contains($0.id) })
+            .help("Добавляет к выбору фото и видео этой страницы, пока выбрано не больше \(PhoneCatalogActionState.selectionLimit).")
+            Divider().frame(height: 16)
+            Button {
+                page = max(0, currentPage - 1)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .keyboardShortcut("[", modifiers: .command)
+            .disabled(currentPage == 0)
+            .help("Предыдущая страница (⌘[)")
+            Text("\(currentPage + 1) из \(pageCount) · \(total) записей")
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Button {
+                page = min(pageCount - 1, currentPage + 1)
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .keyboardShortcut("]", modifiers: .command)
+            .disabled(currentPage >= pageCount - 1)
+            .help("Следующая страница (⌘])")
+        }
+    }
+
+    // MARK: - Action bar
+
+    private func actionBar(snapshot: PhoneCatalogSnapshot, selectedAssets: [PhoneCatalogAsset],
+                           actions: PhoneCatalogActionState) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Text(selectionSummary(actions.selectedCount))
+                    .font(.callout.weight(.medium).monospacedDigit())
+                    .foregroundStyle(actions.selectedCount > PhoneCatalogActionState.selectionLimit ? Color.orange : Color.primary)
+                Button("Снять выбор") { selected.removeAll() }
+                    .disabled(selected.isEmpty || exporter.isExporting)
+                Spacer(minLength: 8)
+                if exporter.isExporting {
+                    ProgressView().controlSize(.small)
+                    Button("Остановить", role: .cancel) { exporter.cancel() }
+                        .keyboardShortcut(.cancelAction)
+                } else if let folder = exporter.outputFolder {
+                    Button {
+                        NSWorkspace.shared.open(folder)
+                    } label: {
+                        Label("Открыть папку", systemImage: "folder")
                     }
                 }
-                .frame(height: 160)
+                Button {
+                    exporter.checkAvailability(assets: selectedAssets, snapshot: snapshot)
+                } label: {
+                    Label("Проверить", systemImage: "checklist")
+                }
+                .disabled(!actions.canCheck)
+                .help("Проверяет, читается ли основной файл каждой выбранной карточки на iPhone сейчас. Архив не создаётся.")
+                Button {
+                    chooseExportFolder(assets: selectedAssets, snapshot: snapshot, livePhoto: true)
+                } label: {
+                    Label("Live Photo…", systemImage: "livephoto")
+                }
+                .disabled(!actions.canSaveLivePhoto)
+                .help("Выберите одну Live Photo. Сохраняются доступные фото и видео неотредактированного снимка; каждый файл до 32 МБ.")
+                Button {
+                    chooseExportFolder(assets: selectedAssets, snapshot: snapshot)
+                } label: {
+                    Label("Сохранить выбранные…", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut("s", modifiers: .command)
+                .disabled(!actions.canSave)
+                .help("Сохранить выбранные файлы в новую папку с отчётом проверки (⌘S).")
+            }
+            ForEach(statusLines(actions: actions)) { line in
+                Label {
+                    Text(line.text).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: line.symbol)
+                }
+                .font(.caption)
+                .foregroundStyle(line.tint)
+            }
+            Text("За раз: до \(PhoneCatalogActionState.selectionLimit) файлов, каждый до 32 МБ; Live Photo — одно фото с видео. Полнота оригиналов и данных правок пока не подтверждена.")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+    }
+
+    private func selectionSummary(_ count: Int) -> String {
+        count == 0 ? "Ничего не выбрано" : "Выбрано: \(count) из \(PhoneCatalogActionState.selectionLimit)"
+    }
+
+    private struct StatusLine: Identifiable {
+        let id: String
+        let symbol: String
+        let text: String
+        let tint: Color
+    }
+
+    private func statusLines(actions: PhoneCatalogActionState) -> [StatusLine] {
+        var lines: [StatusLine] = []
+        if let message = exporter.message {
+            var tint = Color.secondary
+            var symbol = "info.circle"
+            if exporter.isExporting {
+                symbol = "arrow.down.circle"
+            } else if exporter.failedCount > 0 {
+                tint = Color.orange
+                symbol = "exclamationmark.triangle"
+            } else if exporter.exportedCount > 0 {
+                tint = Color.green
+                symbol = "checkmark.circle"
+            }
+            lines.append(StatusLine(id: "export", symbol: symbol, text: message, tint: tint))
+        }
+        if let message = exporter.availabilityMessage {
+            lines.append(StatusLine(id: "availability", symbol: "checklist", text: message, tint: .secondary))
+        }
+        if let message = thumbnails.message {
+            lines.append(StatusLine(id: "thumbnails", symbol: "photo",
+                                    text: message, tint: thumbnails.lastBatchFailed ? .orange : .secondary))
+        }
+        if let hint = actions.hint {
+            lines.append(StatusLine(id: "hint", symbol: "info.circle", text: hint,
+                                    tint: actions.selectedCount > PhoneCatalogActionState.selectionLimit ? .orange : .secondary))
+        }
+        return lines
+    }
+
+    // MARK: - Cards
+
+    private func card(for asset: PhoneCatalogAsset, snapshot: PhoneCatalogSnapshot) -> some View {
+        let isSelected = selected.contains(asset.id)
+        return Button {
+            toggle(asset)
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                thumbnail(for: asset)
+                    .overlay(alignment: .topTrailing) {
+                        if isSelected {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.title2)
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(.white, Color.accentColor)
+                                .padding(6)
+                        } else if asset.isTransferable {
+                            Image(systemName: "circle")
+                                .font(.title2)
+                                .foregroundStyle(.white)
+                                .shadow(color: .black.opacity(0.35), radius: 2)
+                                .padding(6)
+                        }
+                    }
+                    .overlay(alignment: .bottomLeading) {
+                        if asset.mediaType == .video {
+                            Image(systemName: "video.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Color.black.opacity(0.55), in: Capsule())
+                                .padding(6)
+                        }
+                    }
                 Text(asset.filename.isEmpty ? "Имя файла не указано" : asset.filename)
-                    .font(.callout).lineLimit(1)
+                    .font(.callout).lineLimit(1).truncationMode(.middle)
                 Text(rowDetails(for: asset)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                if exporter.availabilitySourceFolder == reader.snapshot?.sourceFolder,
+                if exporter.availabilitySourceFolder == snapshot.sourceFolder,
                    let check = exporter.availabilityResults[asset.id],
-                   check.sourceFolder == reader.snapshot?.sourceFolder {
+                   check.sourceFolder == snapshot.sourceFolder {
                     availabilityLabel(for: check)
                 }
-                if exporter.sourceFolder == reader.snapshot?.sourceFolder {
+                if exporter.sourceFolder == snapshot.sourceFolder {
                     if exporter.savedAssetIDs.contains(asset.id) {
                         Label("Файл сохранён", systemImage: "checkmark.circle")
                             .font(.caption2).foregroundStyle(.green)
@@ -235,15 +455,58 @@ struct PhoneCatalogView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }
-            .padding(8)
-            .background(selected.contains(asset.id) ? Color.accentColor.opacity(0.12) : Color.clear,
+            .padding(7)
+            .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear,
                         in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected.contains(asset.id) ? Color.accentColor : .clear, lineWidth: 2))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.15), lineWidth: isSelected ? 2 : 1))
+            .contentShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
-        .disabled(exporter.isExporting || !asset.isVisibleLibraryItem || (asset.mediaType != .photo && asset.mediaType != .video))
+        .contextMenu {
+            Button(isSelected ? "Снять выбор" : "Выбрать") { toggle(asset) }
+            Divider()
+            Button("Проверить этот файл") {
+                exporter.checkAvailability(assets: [asset], snapshot: snapshot)
+            }
+            .disabled(isBusy)
+            Button("Сохранить этот файл…") {
+                chooseExportFolder(assets: [asset], snapshot: snapshot)
+            }
+            .disabled(isBusy)
+            if asset.mediaType == .photo {
+                Button("Сохранить как Live Photo…") {
+                    chooseExportFolder(assets: [asset], snapshot: snapshot, livePhoto: true)
+                }
+                .disabled(isBusy)
+            }
+        }
+        .disabled(exporter.isExporting || !asset.isTransferable)
         .accessibilityLabel("\(asset.filename), \(rowDetails(for: asset))")
-        .accessibilityValue(selected.contains(asset.id) ? "Выбрано" : "Не выбрано")
+        .accessibilityValue(isSelected ? "Выбрано" : "Не выбрано")
+    }
+
+    private func thumbnail(for asset: PhoneCatalogAsset) -> some View {
+        Color.secondary.opacity(0.1)
+            .frame(maxWidth: .infinity)
+            .frame(height: 150)
+            .overlay {
+                if let image = thumbnails.images[asset.id] {
+                    Image(nsImage: image).resizable().scaledToFill()
+                } else {
+                    VStack(spacing: 6) {
+                        Image(systemName: asset.mediaType == .video ? "video" : "photo").font(.title)
+                        Text(thumbnails.unavailable.contains(asset.id) ? "Превью недоступно" : "Без превью")
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func toggle(_ asset: PhoneCatalogAsset) {
+        if selected.contains(asset.id) { selected.remove(asset.id) } else { selected.insert(asset.id) }
     }
 
     private func availabilityLabel(for check: PhoneAssetAvailabilityCheck) -> some View {
@@ -282,11 +545,21 @@ struct PhoneCatalogView: View {
         }
     }
 
-    private func chooseExportFolder(for snapshot: PhoneCatalogSnapshot, livePhoto: Bool = false) {
-        let assets = selectedAssets
-        guard !livePhoto || (assets.count == 1 && assets[0].isVisibleLibraryItem && assets[0].mediaType == .photo) else { return }
+    // MARK: - Actions
+
+    private func autoLoadIfNeeded() {
+        guard autoLoadPreviews, !thumbnails.lastBatchFailed, !isBusy, let snapshot = reader.snapshot else { return }
+        let assets = currentPageAssets
+        guard thumbnails.canLoad(assets) else { return }
+        thumbnails.load(assets, snapshot: snapshot)
+    }
+
+    private func chooseExportFolder(assets: [PhoneCatalogAsset], snapshot: PhoneCatalogSnapshot, livePhoto: Bool = false) {
+        guard !assets.isEmpty else { return }
+        guard !livePhoto || (assets.count == 1 && assets[0].isTransferable && assets[0].mediaType == .photo) else { return }
         let panel = NSOpenPanel()
         panel.title = livePhoto ? "Сохранить Live Photo с iPhone" : "Сохранить доступные файлы с iPhone"
+        panel.message = "Для независимого архива выберите папку вне iCloud Drive."
         panel.prompt = "Сохранить сюда"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -298,17 +571,6 @@ struct PhoneCatalogView: View {
         } else {
             exporter.export(assets: assets, snapshot: snapshot, destination: destination)
         }
-    }
-
-    private func countCard(title: String, detail: String, photos: Int, videos: Int) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.headline)
-            Text("\(photos) фото · \(videos) видео").font(.title3.monospacedDigit())
-            Text(detail).font(.caption).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func rowDetails(for asset: PhoneCatalogAsset) -> String {

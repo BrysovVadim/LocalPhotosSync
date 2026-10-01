@@ -51,6 +51,8 @@ final class PhoneThumbnailLoader: ObservableObject {
     @Published private(set) var unavailable: Set<Int64> = []
     @Published private(set) var isLoading = false
     @Published private(set) var message: String?
+    /// Set when the last batch stopped on a transport error; automatic loading waits for a manual retry.
+    @Published private(set) var lastBatchFailed = false
 
     private var generation = 0
     private var attempted: Set<Int64> = []
@@ -63,6 +65,7 @@ final class PhoneThumbnailLoader: ObservableObject {
         attempted.removeAll()
         cacheOrder.removeAll()
         message = nil
+        lastBatchFailed = false
     }
 
     func canLoad(_ assets: [PhoneCatalogAsset]) -> Bool {
@@ -81,6 +84,7 @@ final class PhoneThumbnailLoader: ObservableObject {
             return
         }
         isLoading = true
+        lastBatchFailed = false
         message = "Загружаем превью с iPhone…"
         let currentGeneration = generation
         Task {
@@ -109,6 +113,7 @@ final class PhoneThumbnailLoader: ObservableObject {
                     unavailable.insert(asset.id)
                 case .failed(let reason):
                     message = reason
+                    lastBatchFailed = true
                     isLoading = false
                     return
                 }
