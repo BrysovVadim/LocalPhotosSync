@@ -34,6 +34,37 @@ enum PhoneCatalogSelection {
         }
         return result
     }
+
+    /// Shift-click: adds the transferable assets between `anchor` and `target` (both inclusive, in display order),
+    /// walking from the anchor towards the target until the selection reaches `limit`.
+    /// Returns nil when either end is not in `assets`, so the caller can fall back to a plain toggle.
+    static func addingRange(in assets: [PhoneCatalogAsset], from anchor: Int64, to target: Int64,
+                            to selection: Set<Int64>, limit: Int) -> Set<Int64>? {
+        guard let start = assets.firstIndex(where: { $0.id == anchor }),
+              let end = assets.firstIndex(where: { $0.id == target }) else { return nil }
+        let range = start <= end ? Array(assets[start...end]) : Array(assets[end...start].reversed())
+        return adding(range, to: selection, limit: limit)
+    }
+}
+
+/// Card sizes for the catalog grid, smallest first.
+enum PhoneCatalogTileSize {
+    static let steps: [Double] = [132, 168, 224]
+    static let standard: Double = 168
+
+    static func nearestIndex(to value: Double) -> Int {
+        steps.indices.min { abs(steps[$0] - value) < abs(steps[$1] - value) } ?? 1
+    }
+
+    static func smaller(than value: Double) -> Double? {
+        let index = nearestIndex(to: value)
+        return index > 0 ? steps[index - 1] : nil
+    }
+
+    static func larger(than value: Double) -> Double? {
+        let index = nearestIndex(to: value)
+        return index < steps.count - 1 ? steps[index + 1] : nil
+    }
 }
 
 /// Which catalog actions are available for the current selection, and a short reason when they are not.

@@ -6,7 +6,9 @@ struct PhoneCatalogView: View {
     @StateObject private var thumbnails = PhoneThumbnailLoader()
     @ObservedObject var exporter: PhoneAssetExporter
     @AppStorage("catalog.autoLoadPreviews") private var autoLoadPreviews = false
+    @AppStorage("catalog.tileSize") private var tileSize = PhoneCatalogTileSize.standard
     @Environment(\.isEnabled) private var isEnabled
+    @State private var selectionAnchor: Int64?
     @State private var category = PhoneCatalogCategory.mediaLibrary
     @State private var type = PhoneCatalogTypeFilter.all
     @State private var search = ""
@@ -74,6 +76,7 @@ struct PhoneCatalogView: View {
         .onChange(of: reader.snapshot?.sourceFolder) { _, _ in
             page = 0
             selected.removeAll()
+            selectionAnchor = nil
             thumbnails.reset()
         }
         .task(id: autoLoadKey) {
@@ -171,7 +174,7 @@ struct PhoneCatalogView: View {
         .padding(.bottom, 10)
 
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 168), spacing: 12)], spacing: 12,
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: tileSize), spacing: 12)], spacing: 12,
                       pinnedViews: [.sectionHeaders]) {
                 ForEach(Array(PhoneCatalogTimeline.sections(of: pageAssets).enumerated()), id: \.offset) { _, section in
                     Section {
@@ -304,7 +307,26 @@ struct PhoneCatalogView: View {
             }
             .disabled(exporter.isExporting || selected.count >= PhoneCatalogActionState.selectionLimit ||
                       !pageAssets.contains { $0.isTransferable && !selected.contains($0.id) })
-            .help("Добавляет к выбору фото и видео этой страницы, пока выбрано не больше \(PhoneCatalogActionState.selectionLimit).")
+            .help("Добавляет к выбору фото и видео этой страницы, пока выбрано не больше \(PhoneCatalogActionState.selectionLimit). Shift-щелчок по карточке выбирает диапазон от предыдущей.")
+            ControlGroup {
+                Button {
+                    if let size = PhoneCatalogTileSize.smaller(than: tileSize) { tileSize = size }
+                } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .keyboardShortcut("-", modifiers: .command)
+                .disabled(PhoneCatalogTileSize.smaller(than: tileSize) == nil)
+                .help("Мельче карточки (⌘−)")
+                Button {
+                    if let size = PhoneCatalogTileSize.larger(than: tileSize) { tileSize = size }
+                } label: {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                .keyboardShortcut("=", modifiers: .command)
+                .disabled(PhoneCatalogTileSize.larger(than: tileSize) == nil)
+                .help("Крупнее карточки (⌘=)")
+            }
+            .fixedSize()
             Divider().frame(height: 16)
             Button {
                 page = max(0, currentPage - 1)
@@ -428,7 +450,7 @@ struct PhoneCatalogView: View {
     private func card(for asset: PhoneCatalogAsset, snapshot: PhoneCatalogSnapshot) -> some View {
         let isSelected = selected.contains(asset.id)
         return Button {
-            toggle(asset)
+            handleClick(asset)
         } label: {
             VStack(alignment: .leading, spacing: 5) {
                 thumbnail(for: asset)
@@ -515,7 +537,7 @@ struct PhoneCatalogView: View {
     private func thumbnail(for asset: PhoneCatalogAsset) -> some View {
         Color.secondary.opacity(0.1)
             .frame(maxWidth: .infinity)
-            .frame(height: 150)
+            .frame(height: (tileSize * 0.9).rounded())
             .overlay {
                 if let image = thumbnails.images[asset.id] {
                     Image(nsImage: image).resizable().scaledToFill()
@@ -529,6 +551,18 @@ struct PhoneCatalogView: View {
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+
+    /// A plain click toggles one card; Shift-click adds the range from the previous click (within the limit).
+    private func handleClick(_ asset: PhoneCatalogAsset) {
+        if NSEvent.modifierFlags.contains(.shift), let anchor = selectionAnchor, anchor != asset.id,
+           let range = PhoneCatalogSelection.addingRange(in: visibleAssets, from: anchor, to: asset.id, to: selected,
+                                                        limit: PhoneCatalogActionState.selectionLimit) {
+            selected = range
+        } else {
+            toggle(asset)
+        }
+        selectionAnchor = asset.id
     }
 
     private func toggle(_ asset: PhoneCatalogAsset) {

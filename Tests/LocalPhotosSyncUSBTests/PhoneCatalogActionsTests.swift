@@ -70,6 +70,27 @@ final class PhoneCatalogActionsTests: XCTestCase {
         XCTAssertNil(busy.hint)
     }
 
+    func testShiftClickSelectsRangeFromAnchorUpToLimit() {
+        let assets = (Int64(1)...30).map { asset($0) }
+        XCTAssertEqual(PhoneCatalogSelection.addingRange(in: assets, from: 3, to: 6, to: [3], limit: 12), Set<Int64>(3...6))
+        XCTAssertEqual(PhoneCatalogSelection.addingRange(in: assets, from: 6, to: 3, to: [], limit: 12), Set<Int64>(3...6))
+        // Walks from the anchor, so a capped backwards range keeps the items nearest the anchor.
+        XCTAssertEqual(PhoneCatalogSelection.addingRange(in: assets, from: 20, to: 1, to: [], limit: 5), Set<Int64>(16...20))
+        XCTAssertEqual(PhoneCatalogSelection.addingRange(in: assets, from: 1, to: 30, to: [25], limit: 3), [25, 1, 2])
+        XCTAssertNil(PhoneCatalogSelection.addingRange(in: assets, from: 99, to: 3, to: [], limit: 12))
+
+        let mixed = [asset(1), asset(2, hidden: true), asset(3, type: .other), asset(4)]
+        XCTAssertEqual(PhoneCatalogSelection.addingRange(in: mixed, from: 1, to: 4, to: [], limit: 12), [1, 4])
+    }
+
+    func testTileSizeSteps() {
+        XCTAssertEqual(PhoneCatalogTileSize.smaller(than: 168), 132)
+        XCTAssertNil(PhoneCatalogTileSize.smaller(than: 132))
+        XCTAssertEqual(PhoneCatalogTileSize.larger(than: 168), 224)
+        XCTAssertNil(PhoneCatalogTileSize.larger(than: 224))
+        XCTAssertEqual(PhoneCatalogTileSize.larger(than: 150), 168, "Unknown stored sizes snap to the nearest step")
+    }
+
     private func asset(_ id: Int64, type: PhoneCatalogMediaType = .photo, hidden: Bool = false) -> PhoneCatalogAsset {
         PhoneCatalogAsset(id: id, filename: "IMG_\(id).HEIC", createdAt: nil, mediaType: type,
                           scope: .mediaLibrary, isHidden: hidden, visibilityState: 0)

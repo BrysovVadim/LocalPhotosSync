@@ -26,6 +26,15 @@ final class PhoneCatalogViewRenderTests: XCTestCase {
             XCTAssertGreaterThan(png.count, 10_000, item.name)
             try png.write(to: output.appendingPathComponent("\(item.name).png"))
         }
+
+        let defaults = UserDefaults.standard
+        let previousSize = defaults.object(forKey: "catalog.tileSize")
+        defaults.set(PhoneCatalogTileSize.steps.last, forKey: "catalog.tileSize")
+        defer { defaults.set(previousSize, forKey: "catalog.tileSize") }
+        let large = PhoneCatalogView(exporter: PhoneAssetExporter(),
+                                     reader: PhoneCatalogReader(fixedSnapshot: snapshot))
+        try ScreenRenderer.render(large, size: CGSize(width: 1060, height: 760))
+            .write(to: output.appendingPathComponent("catalog-large-tiles.png"))
     }
 
     private static func fixtureSnapshot() -> PhoneCatalogSnapshot {
