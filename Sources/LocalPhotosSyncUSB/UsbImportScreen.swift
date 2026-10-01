@@ -154,6 +154,13 @@ struct UsbImportScreen: View {
             }
             Spacer(minLength: 8)
             Button {
+                actions.verifyArchive()
+            } label: {
+                Label(state.verifyingArchive ? "Проверка…" : "Проверить архив…", systemImage: "checkmark.shield")
+            }
+            .disabled(state.verifyingArchive || state.importing)
+            .help("Сверить сохранённую папку переноса с её отчётом и контрольными суммами. Телефон для этого не нужен.")
+            Button {
                 actions.copyDiagnostics()
             } label: {
                 Label("Диагностика", systemImage: "doc.on.clipboard")
@@ -292,10 +299,12 @@ struct UsbImportScreen: View {
     private var actionBar: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Text(selectionSummary)
-                    .font(.callout.weight(.medium).monospacedDigit())
-                Button("Снять выбор") { actions.setSelection([]) }
-                    .disabled(state.selected.isEmpty || state.importing)
+                if hasFiles {
+                    Text(selectionSummary)
+                        .font(.callout.weight(.medium).monospacedDigit())
+                    Button("Снять выбор") { actions.setSelection([]) }
+                        .disabled(state.selected.isEmpty || state.importing)
+                }
                 Spacer(minLength: 8)
                 if state.importing {
                     ProgressView(value: Double(state.importProcessed), total: Double(max(1, state.importTotal)))
@@ -311,22 +320,17 @@ struct UsbImportScreen: View {
                         Label("Открыть папку", systemImage: "folder")
                     }
                 }
-                Button {
-                    actions.verifyArchive()
-                } label: {
-                    Label(state.verifyingArchive ? "Проверка…" : "Проверить папку архива…", systemImage: "checkmark.shield")
+                if hasFiles {
+                    Button {
+                        actions.importSelected()
+                    } label: {
+                        Label("Сохранить выбранные…", systemImage: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut("s", modifiers: .command)
+                    .disabled(!state.ready || state.selected.isEmpty || state.importing)
+                    .help("Сохранить выбранные файлы в новую папку с отчётом и контрольными суммами (⌘S).")
                 }
-                .disabled(state.verifyingArchive || state.importing)
-                .help("Сверить сохранённую папку с её отчётом. Телефон для этого не нужен.")
-                Button {
-                    actions.importSelected()
-                } label: {
-                    Label("Сохранить выбранные…", systemImage: "square.and.arrow.down")
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut("s", modifiers: .command)
-                .disabled(!state.ready || state.selected.isEmpty || state.importing)
-                .help("Сохранить выбранные файлы в новую папку с отчётом и контрольными суммами (⌘S).")
             }
             ForEach(statusLines) { line in
                 StatusMessageRow(symbol: line.symbol, text: line.text, tone: line.tone)
@@ -335,6 +339,8 @@ struct UsbImportScreen: View {
                 .font(.caption2).foregroundStyle(.tertiary)
         }
     }
+
+    private var hasFiles: Bool { !state.items.isEmpty || state.importing }
 
     private var selectionSummary: String {
         guard !state.selected.isEmpty else { return "Ничего не выбрано" }
