@@ -15,6 +15,17 @@ mkdir "$staging_root"
 mkdir -p "$staging_app/Contents/MacOS"
 cp "$binary_dir/LocalPhotosSyncUSB" "$staging_app/Contents/MacOS/LocalPhotosSyncUSB"
 cp "$project_root/Resources/Info.plist" "$staging_app/Contents/Info.plist"
+mkdir -p "$staging_app/Contents/Resources"
+iconset="$staging_root/AppIcon.iconset"
+mkdir "$iconset"
+icon_source="$project_root/Resources/AppIcon/AppIcon-1024.png"
+for size in 16 32 128 256 512; do
+    sips -z $size $size "$icon_source" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    double=$(( size * 2 ))
+    sips -z $double $double "$icon_source" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$staging_app/Contents/Resources/AppIcon.icns"
+rm -rf "$iconset"
 codesign --force --sign - --options runtime --entitlements "$project_root/Resources/Entitlements.plist" "$staging_app"
 codesign --verify --deep --strict "$staging_app"
 

@@ -52,4 +52,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: App bundle and signature
-        run: zsh scripts/build-app.sh
+        run: |
+          zsh scripts/build-app.sh
+          test -s ".build/LocalPhotosSync USB.app/Contents/Resources/AppIcon.icns"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" ".build/LocalPhotosSync USB.app/Contents/Info.plist"
