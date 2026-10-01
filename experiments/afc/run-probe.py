@@ -14,7 +14,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / ".build" / "afc-runtime"
 SOURCE = ROOT / "experiments" / "afc" / "catalog-header.c"
-OUTPUT = ROOT / ".build" / "afc-runtime" / "catalog-header-probe"
+EXECUTABLE_NAME = "catalog-header-probe"
 INCLUDES = [
     RUNTIME / "libimobiledevice" / "1.4.0" / "include",
     RUNTIME / "libusbmuxd" / "2.1.1" / "include",
@@ -39,16 +39,25 @@ def emit(status, fields=None):
 
 
 def compile_probe(env):
+    executable_root = ROOT / ".build" / "probe-executables"
+    try:
+        executable_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        build_folder = executable_root / str(uuid.uuid4())
+        build_folder.mkdir(mode=0o700)
+        os.chmod(build_folder, 0o700)
+        executable = build_folder / EXECUTABLE_NAME
+    except OSError:
+        return None
     command = ["clang", "-std=c11", "-Wall", "-Wextra", "-Werror"]
     command.extend(f"-I{path}" for path in INCLUDES)
     command.extend(f"-L{path}" for path in LIBDIRS)
-    command.extend([str(SOURCE), "-limobiledevice-1.0", "-lusbmuxd-2.0", "-lplist-2.0", "-o", str(OUTPUT)])
+    command.extend([str(SOURCE), "-limobiledevice-1.0", "-lusbmuxd-2.0", "-lplist-2.0", "-o", str(executable)])
     try:
         result = subprocess.run(command, cwd=ROOT, env=env, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, check=False)
-    except OSError:
-        return False
-    return result.returncode == 0
+                                stderr=subprocess.DEVNULL, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return executable if result.returncode == 0 else None
 
 
 def safe_child_json(raw):
@@ -135,12 +144,13 @@ def main(argv):
     env = os.environ.copy()
     env.pop("USBMUXD_SOCKET_ADDRESS", None)
     env["DYLD_LIBRARY_PATH"] = DYLD_PATH
-    if not compile_probe(env):
+    executable = compile_probe(env)
+    if executable is None:
         emit("probe_build_failed")
         return 1
 
     snapshot = None
-    command = [str(OUTPUT)]
+    command = [str(executable)]
     timeout = 20
     if copy_mode:
         snapshot_root = ROOT / ".build" / "phone-catalog-probe"

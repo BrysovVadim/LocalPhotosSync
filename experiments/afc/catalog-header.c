@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "source-binding.h"
 
 #define DB_LIMIT (256ULL * 1024ULL * 1024ULL)
 #define WAL_LIMIT (64ULL * 1024ULL * 1024ULL)
@@ -74,6 +75,24 @@ done:
     if (out >= 0) close(out);
     if (before_info) afc_dictionary_free(before_info);
     if (after_info) afc_dictionary_free(after_info);
+    return ok;
+}
+
+static int write_source_binding(int dirfd, const char *udid) {
+    uint8_t binding[SOURCE_BINDING_BYTES];
+    if (!source_binding_create(udid, binding)) { memset(binding, 0, sizeof(binding)); return 0; }
+    int fd = openat(dirfd, "source-binding.bin", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) { memset(binding, 0, sizeof(binding)); return 0; }
+    int ok = fchmod(fd, 0600) == 0;
+    size_t total = 0;
+    while (ok && total < sizeof(binding)) {
+        ssize_t written = write(fd, binding + total, sizeof(binding) - total);
+        if (written <= 0) ok = 0;
+        else total += (size_t)written;
+    }
+    if (ok && fsync(fd) != 0) ok = 0;
+    if (close(fd) != 0) ok = 0;
+    memset(binding, 0, sizeof(binding));
     return ok;
 }
 
@@ -172,6 +191,8 @@ int main(int argc, char **argv) {
         status = "metadata_copy_failed";
         if (size > DB_LIMIT || !copy_one(afc, dirfd, "/PhotoData/Photos.sqlite", "Photos.sqlite", DB_LIMIT, 0, &db_copied, &db_stable, &db_present)) goto cleanup;
         if (!copy_one(afc, dirfd, "/PhotoData/Photos.sqlite-wal", "Photos.sqlite-wal", WAL_LIMIT, 1, &wal_copied, &wal_stable, &wal_present)) goto cleanup;
+        status = "source_binding_write_failed";
+        if (!write_source_binding(dirfd, udid)) goto cleanup;
         status = "metadata_copy_complete";
     }
 

@@ -48,6 +48,7 @@ enum PhoneCatalogTypeFilter: String, CaseIterable, Identifiable {
 struct PhoneCatalogSnapshot: Equatable, Sendable {
     let assets: [PhoneCatalogAsset]
     let snapshotDate: Date
+    let sourceFolder: URL
 
     func assets(category: PhoneCatalogCategory, type: PhoneCatalogTypeFilter = .all, search: String = "") -> [PhoneCatalogAsset] {
         assets.filter { asset in
@@ -177,7 +178,7 @@ enum PhoneCatalogDatabase {
                 visibilityState: visibility
             ))
         }
-        return PhoneCatalogSnapshot(assets: assets, snapshotDate: snapshotDate)
+        return PhoneCatalogSnapshot(assets: assets, snapshotDate: snapshotDate, sourceFolder: snapshotFolder)
     }
 
     private static func validateReceipt(in folder: URL, databaseURL: URL) throws -> Date {

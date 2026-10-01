@@ -2,12 +2,21 @@ import SwiftUI
 
 struct PhoneCatalogView: View {
     @StateObject private var reader = PhoneCatalogReader()
+    @StateObject private var thumbnails = PhoneThumbnailLoader()
     @State private var category = PhoneCatalogCategory.mediaLibrary
     @State private var type = PhoneCatalogTypeFilter.all
     @State private var search = ""
+    @State private var selected: Set<Int64> = []
+    @State private var page = 0
+    private let pageSize = 24
 
     private var visibleAssets: [PhoneCatalogAsset] {
         reader.snapshot?.assets(category: category, type: type, search: search) ?? []
+    }
+
+    private var pageCount: Int { max(1, (visibleAssets.count + pageSize - 1) / pageSize) }
+    private var pageAssets: [PhoneCatalogAsset] {
+        Array(visibleAssets.dropFirst(min(page, pageCount - 1) * pageSize).prefix(pageSize))
     }
 
     var body: some View {
@@ -29,7 +38,7 @@ struct PhoneCatalogView: View {
                         Label("Обновить с iPhone", systemImage: "arrow.clockwise")
                     }
                 }
-                .disabled(reader.isRefreshing || reader.isLoadingSnapshot)
+                .disabled(reader.isRefreshing || reader.isLoadingSnapshot || thumbnails.isLoading)
             }
 
             if let error = reader.errorMessage {
@@ -71,29 +80,39 @@ struct PhoneCatalogView: View {
                 Text(categoryNote)
                     .font(.caption).foregroundStyle(.secondary)
 
-                List(visibleAssets) { asset in
-                    HStack(spacing: 12) {
-                        Image(systemName: asset.mediaType == .video ? "video" : "photo")
-                            .foregroundStyle(.secondary).frame(width: 24)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(asset.filename.isEmpty ? "Имя файла не указано" : asset.filename)
-                                .lineLimit(1).textSelection(.enabled)
-                            Text(rowDetails(for: asset))
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if asset.isHidden || asset.visibilityState != 0 {
-                            Text(asset.isHidden ? "Скрыто" : "Состояние (asset.visibilityState)")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
+                HStack {
+                    Button {
+                        thumbnails.load(pageAssets, snapshot: snapshot)
+                    } label: {
+                        Label(thumbnails.isLoading ? "Загрузка превью…" : "Загрузить превью", systemImage: "photo")
                     }
-                    .padding(.vertical, 3)
+                    .disabled(thumbnails.isLoading || reader.isRefreshing || !thumbnails.canLoad(pageAssets))
+                    Text("До 12 файлов за раз").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Выбрано: \(selected.count)").monospacedDigit()
+                    Button("Снять выбор") { selected.removeAll() }.disabled(selected.isEmpty)
                 }
-                .listStyle(.inset)
+                if let message = thumbnails.message {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                }
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 175), spacing: 12)], spacing: 12) {
+                        ForEach(pageAssets) { asset in card(for: asset) }
+                    }
+                    .padding(2)
+                }
                 .overlay {
                     if visibleAssets.isEmpty {
                         ContentUnavailableView("Записей нет", systemImage: "photo.on.rectangle.angled")
                     }
+                }
+                HStack {
+                    Button("Предыдущая") { page = max(0, page - 1) }.disabled(page == 0)
+                    Text("Страница \(min(page, pageCount - 1) + 1) из \(pageCount) · \(visibleAssets.count) записей")
+                        .font(.caption).monospacedDigit()
+                    Button("Следующая") { page = min(pageCount - 1, page + 1) }.disabled(page >= pageCount - 1)
+                    Spacer()
+                    Text("Перенос выбранных записей пока не подключён").font(.caption).foregroundStyle(.secondary)
                 }
             } else if reader.isRefreshing || reader.isLoadingSnapshot {
                 ContentUnavailableView {
@@ -113,6 +132,55 @@ struct PhoneCatalogView: View {
         }
         .padding(20)
         .frame(minWidth: 760, minHeight: 540)
+        .onChange(of: category) { _, _ in page = 0 }
+        .onChange(of: type) { _, _ in page = 0 }
+        .onChange(of: search) { _, _ in page = 0 }
+        .onChange(of: reader.snapshot?.sourceFolder) { _, _ in
+            page = 0
+            selected.removeAll()
+            thumbnails.reset()
+        }
+    }
+
+    private func card(for asset: PhoneCatalogAsset) -> some View {
+        Button {
+            if selected.contains(asset.id) { selected.remove(asset.id) } else { selected.insert(asset.id) }
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                ZStack(alignment: .topTrailing) {
+                    RoundedRectangle(cornerRadius: 8).fill(.quaternary)
+                    if let image = thumbnails.images[asset.id] {
+                        Image(nsImage: image).resizable().scaledToFit().padding(3)
+                    } else {
+                        VStack(spacing: 7) {
+                            Image(systemName: asset.mediaType == .video ? "video" : "photo").font(.largeTitle)
+                            Text(thumbnails.unavailable.contains(asset.id) ? "Превью недоступно" : "Без превью")
+                                .font(.caption)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity).foregroundStyle(.secondary)
+                    }
+                    if selected.contains(asset.id) {
+                        Image(systemName: "checkmark.circle.fill").font(.title2)
+                            .foregroundStyle(.white, Color.accentColor).padding(6)
+                    }
+                }
+                .frame(height: 160)
+                Text(asset.filename.isEmpty ? "Имя файла не указано" : asset.filename)
+                    .font(.callout).lineLimit(1)
+                Text(rowDetails(for: asset)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if asset.isHidden || asset.visibilityState != 0 {
+                    Text(asset.isHidden ? "Скрыто" : "Дополнительная запись")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .padding(8)
+            .background(selected.contains(asset.id) ? Color.accentColor.opacity(0.12) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected.contains(asset.id) ? Color.accentColor : .clear, lineWidth: 2))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(asset.filename), \(rowDetails(for: asset))")
+        .accessibilityValue(selected.contains(asset.id) ? "Выбрано" : "Не выбрано")
     }
 
     private var categoryNote: String {
@@ -120,11 +188,11 @@ struct PhoneCatalogView: View {
         case .mediaLibrary:
             return "Основная категория телефона с обычной видимостью. Скрытые, удалённые и записи других категорий здесь не показаны."
         case .allRecords:
-            return "Все активные записи каталога, включая дополнительные категории, скрытые элементы и записи серий. Это не точный счётчик приложения «Фото»."
+            return "Все активные записи, включая дополнительные категории, скрытые элементы и серии. Превью загружаются для основной видимой медиатеки."
         case .otherRecords:
-            return "Дополнительные записи телефона. Их состав зависит от версии iOS и истории синхронизации."
+            return "Дополнительные записи телефона. Превью этой категории пока не подключены."
         case .unknownScope:
-            return "Записи, для которых категория каталога не распознана."
+            return "Записи, для которых категория каталога не распознана. Превью этой категории пока не подключены."
         }
     }
 
