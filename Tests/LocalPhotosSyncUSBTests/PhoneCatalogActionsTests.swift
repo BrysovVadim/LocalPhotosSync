@@ -157,3 +157,25 @@ final class PhoneCatalogDiagnosticsTests: XCTestCase {
         XCTAssertFalse(text.contains("/nonexistent"), "Paths of the snapshot folder are not included")
     }
 }
+
+final class PhoneCatalogCSVTests: XCTestCase {
+    func testRowsQuotingAndStates() {
+        let folder = URL(fileURLWithPath: "/s")
+        let assets = [
+            PhoneCatalogAsset(id: 1, filename: "IMG_1.HEIC", createdAt: Date(timeIntervalSince1970: 1_790_000_000),
+                              mediaType: .photo, scope: .mediaLibrary, isHidden: false, visibilityState: 0),
+            PhoneCatalogAsset(id: 2, filename: "a,\"b\".mov", createdAt: nil, mediaType: .video,
+                              scope: .otherRecords, isHidden: true, visibilityState: 0),
+            PhoneCatalogAsset(id: 3, filename: "=cmd()", createdAt: nil, mediaType: .other,
+                              scope: .unknown, isHidden: false, visibilityState: 0),
+        ]
+        let checks = [1: PhoneAssetAvailabilityCheck(state: .mainFileReadable(bytes: 42), sourceFolder: folder, checkedAt: Date())]
+        let csv = PhoneCatalogCSV.make(assets: assets, checks: checks, saved: [1], failed: [2])
+        let lines = csv.components(separatedBy: "\r\n")
+        XCTAssertEqual(lines[0], PhoneCatalogCSV.header.joined(separator: ","))
+        XCTAssertEqual(lines[1], "1,IMG_1.HEIC,photo,2026-09-21T14:13:20Z,library,no,readable,42,saved")
+        XCTAssertEqual(lines[2], "2,\"a,\"\"b\"\".mov\",video,,other,yes,,,not_saved")
+        XCTAssertEqual(lines[3], "3,'=cmd(),other,,unknown,no,,,")
+        XCTAssertEqual(lines.count, 5, "Trailing CRLF after the last row")
+    }
+}

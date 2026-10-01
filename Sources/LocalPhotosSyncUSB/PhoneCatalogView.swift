@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct PhoneCatalogView: View {
     @StateObject private var reader: PhoneCatalogReader
@@ -138,15 +139,21 @@ struct PhoneCatalogView: View {
                 statChip(.mediaLibrary, counts: snapshot.counts(in: .mediaLibrary))
                 statChip(.allRecords, counts: snapshot.counts(in: .allRecords))
             }
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(reader.diagnostics(thumbnailsLoaded: thumbnails.images.count,
-                                                                  autoLoadPreviews: autoLoadPreviews), forType: .string)
+            Menu {
+                Button("Сохранить список (CSV)…") { saveListAsCSV() }
+                    .disabled(reader.snapshot == nil)
+                Button("Скопировать диагностику") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(reader.diagnostics(thumbnailsLoaded: thumbnails.images.count,
+                                                                      autoLoadPreviews: autoLoadPreviews), forType: .string)
+                }
             } label: {
-                Image(systemName: "doc.on.clipboard")
+                Image(systemName: "ellipsis.circle")
             }
-            .help("Скопировать диагностику каталога: версии, наличие AFC runtime, снимки, счётчики и последнюю ошибку. Имена файлов и идентификаторы телефона не включаются.")
-            .accessibilityLabel("Скопировать диагностику каталога")
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Сохранить список текущего вида в CSV или скопировать диагностику (без имён файлов и идентификаторов телефона).")
+            .accessibilityLabel("Ещё")
             Button {
                 reader.refresh()
             } label: {
@@ -675,6 +682,29 @@ struct PhoneCatalogView: View {
         let assets = currentPageAssets
         guard thumbnails.canLoad(assets) else { return }
         thumbnails.load(assets, snapshot: snapshot)
+    }
+
+    /// Writes the records of the current view (category, type, search, order) as CSV to a file the user picks.
+    private func saveListAsCSV() {
+        guard let snapshot = reader.snapshot else { return }
+        let checks = exporter.availabilitySourceFolder == snapshot.sourceFolder
+            ? exporter.availabilityResults.filter { $0.value.sourceFolder == snapshot.sourceFolder } : [:]
+        let sameExport = exporter.sourceFolder == snapshot.sourceFolder
+        let csv = PhoneCatalogCSV.make(assets: filteredAssets(in: snapshot), checks: checks,
+                                       saved: sameExport ? exporter.savedAssetIDs : [],
+                                       failed: sameExport ? exporter.failedAssetIDs : [])
+        let panel = NSSavePanel()
+        panel.title = "Сохранить список каталога"
+        panel.message = "Список текущего вида: имена файлов, типы, даты и итоги проверок."
+        let stamp = Date().formatted(.iso8601.year().month().day())
+        panel.nameFieldStringValue = "LocalPhotosSync-каталог-\(stamp).csv"
+        panel.allowedContentTypes = [.commaSeparatedText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try Data(csv.utf8).write(to: url, options: .atomic)
+        } catch {
+            NSAlert(error: error).runModal()
+        }
     }
 
     private func chooseExportFolder(assets: [PhoneCatalogAsset], snapshot: PhoneCatalogSnapshot, livePhoto: Bool = false) {
