@@ -37,6 +37,7 @@ final class PhoneCatalogViewRenderTests: XCTestCase {
         let hosting = NSHostingView(rootView: view.frame(width: size.width, height: size.height))
         hosting.frame = CGRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: hosting.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: appearance)
         window.contentView = hosting
         hosting.layoutSubtreeIfNeeded()
@@ -44,7 +45,7 @@ final class PhoneCatalogViewRenderTests: XCTestCase {
         hosting.layoutSubtreeIfNeeded()
         let rep = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
         hosting.cacheDisplay(in: hosting.bounds, to: rep)
-        window.close()
+        window.contentView = nil
         return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
     }
 
