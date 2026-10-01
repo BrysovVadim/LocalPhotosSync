@@ -418,6 +418,7 @@ struct PhoneCatalogView: View {
                             Image(systemName: "circle")
                                 .font(.title2)
                                 .foregroundStyle(.white)
+                                .background(Circle().fill(Color.black.opacity(0.18)))
                                 .shadow(color: .black.opacity(0.35), radius: 2)
                                 .padding(6)
                         }

@@ -34,7 +34,9 @@ final class PhoneCatalogViewRenderTests: XCTestCase {
     }
 
     private func render<V: View>(_ view: V, size: CGSize, appearance: NSAppearance.Name) throws -> Data {
-        let hosting = NSHostingView(rootView: view.frame(width: size.width, height: size.height))
+        let hosting = NSHostingView(rootView: view
+            .frame(width: size.width, height: size.height)
+            .background(Color(nsColor: .windowBackgroundColor)))
         hosting.frame = CGRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: hosting.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
