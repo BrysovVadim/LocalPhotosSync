@@ -124,6 +124,8 @@ final class PhoneAssetExporter: ObservableObject {
     """
 
     @Published private(set) var isExporting = false
+    /// True only while files are being copied (not during availability checks).
+    @Published private(set) var isTransferring = false
     @Published private(set) var message: String?
     @Published private(set) var outputFolder: URL?
     @Published private(set) var exportedCount = 0
@@ -216,6 +218,7 @@ final class PhoneAssetExporter: ObservableObject {
             return
         }
         isExporting = true
+        isTransferring = true
         outputFolder = nil
         exportedCount = 0
         failedCount = 0
@@ -243,6 +246,7 @@ final class PhoneAssetExporter: ObservableObject {
             message = result.message
             activeCancellation = nil
             isExporting = false
+            isTransferring = false
         }
     }
 
@@ -262,6 +266,7 @@ final class PhoneAssetExporter: ObservableObject {
             return
         }
         isExporting = true
+        isTransferring = true
         message = "Проверяем и сохраняем пару Live Photo…"
         let cancellation = PhoneAssetExportCancellation()
         activeCancellation = cancellation
@@ -283,6 +288,7 @@ final class PhoneAssetExporter: ObservableObject {
             message = result.message
             activeCancellation = nil
             isExporting = false
+            isTransferring = false
         }
     }
 

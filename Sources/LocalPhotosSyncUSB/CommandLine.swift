@@ -110,9 +110,13 @@ enum LocalPhotosSyncCLI {
     }
 
     /// Checks every archive the app remembers. Read-only: the history file is not updated, so it cannot race the app.
-    static func verifyArchives(historyAt url: URL?) -> Outcome {
-        guard let url = url ?? ArchiveHistoryStore.defaultFileURL() else {
+    static func verifyArchives(historyAt explicit: URL?) -> Outcome {
+        guard let url = explicit ?? ArchiveHistoryStore.defaultFileURL() else {
             return Outcome(exitCode: 2, stdout: "{\"error\":\"History location unavailable\"}", stderr: "")
+        }
+        if explicit != nil && !FileManager.default.fileExists(atPath: url.path) {
+            let json = (try? encodeJSON(RuntimeError(error: "Archive history not found: \(url.path)"))) ?? "{\"error\":\"Archive history not found\"}"
+            return Outcome(exitCode: 2, stdout: json, stderr: "")
         }
         let records: [ArchiveRecord]
         do { records = try ArchiveHistoryFile.load(from: url) }

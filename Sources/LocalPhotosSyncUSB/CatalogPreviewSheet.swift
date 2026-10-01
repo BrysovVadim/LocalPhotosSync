@@ -47,6 +47,9 @@ struct CatalogPreviewSheet: View {
                 Spacer(minLength: 0)
             } else {
                 ContentUnavailableView("Карточка недоступна", systemImage: "photo")
+                Button("Закрыть") { actions.close() }
+                    .keyboardShortcut(.cancelAction)
+                    .padding(16)
             }
         }
         .frame(width: 640, height: 600)

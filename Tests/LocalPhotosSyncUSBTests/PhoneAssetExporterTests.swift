@@ -687,4 +687,17 @@ final class PhoneAssetExporterTests: XCTestCase {
         XCTAssertFalse(PhoneAssetExporter.runFolderName(livePhoto: false).contains(":"))
     }
 
+
+    @MainActor
+    func testAvailabilityCheckIsBusyButNotATransfer() {
+        let exporter = PhoneAssetExporter(availabilityProbeRunner: { _, _, _, _ in .mainFileReadable(bytes: 10) })
+        let asset = PhoneCatalogAsset(id: 7, filename: "IMG_0007.HEIC", createdAt: nil, mediaType: .photo,
+                                      scope: .mediaLibrary, isHidden: false, visibilityState: 0)
+        let snapshot = PhoneCatalogSnapshot(assets: [asset], snapshotDate: Date(),
+                                            sourceFolder: URL(fileURLWithPath: "/nonexistent/snapshot"))
+        exporter.checkAvailability(assets: [asset], snapshot: snapshot)
+        XCTAssertTrue(exporter.isExporting)
+        XCTAssertFalse(exporter.isTransferring, "Checks must not show transfer progress in the Dock")
+    }
+
 }

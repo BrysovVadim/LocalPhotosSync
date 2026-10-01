@@ -12,8 +12,10 @@ struct PhoneCatalogView: View {
     @State private var showOnlySelected = false
     @AppStorage("catalog.oldestFirst") private var oldestFirst = false
     @State private var previewIndex: Int?
-    @AppStorage("catalog.category") private var category = PhoneCatalogCategory.mediaLibrary
-    @AppStorage("catalog.type") private var type = PhoneCatalogTypeFilter.all
+    /// Cards of the page when the preview opened; frozen so selection changes cannot shift or empty the list.
+    @State private var previewAssets: [PhoneCatalogAsset] = []
+    @AppStorage("catalog.categoryCode") private var categoryCode = PhoneCatalogCategory.mediaLibrary.storageCode
+    @AppStorage("catalog.typeCode") private var typeCode = PhoneCatalogTypeFilter.all.storageCode
     @State private var search = ""
     @State private var selected: Set<Int64>
     @State private var page = 0
@@ -23,6 +25,16 @@ struct PhoneCatalogView: View {
         self.exporter = exporter
         _reader = StateObject(wrappedValue: reader ?? PhoneCatalogReader())
         _selected = State(initialValue: selected)
+    }
+
+    private var category: PhoneCatalogCategory {
+        get { PhoneCatalogCategory(storageCode: categoryCode) }
+        nonmutating set { categoryCode = newValue.storageCode }
+    }
+
+    private var type: PhoneCatalogTypeFilter {
+        get { PhoneCatalogTypeFilter(storageCode: typeCode) }
+        nonmutating set { typeCode = newValue.storageCode }
     }
 
     private var isBusy: Bool {
@@ -84,6 +96,9 @@ struct PhoneCatalogView: View {
         .onChange(of: page) { _, _ in thumbnails.supersede() }
         .onChange(of: selected) { _, selection in
             if selection.isEmpty { showOnlySelected = false }
+            if showOnlySelected {
+                page = PhoneCatalogPaging.clamp(page, total: visibleAssets.count, pageSize: pageSize)
+            }
         }
         .onChange(of: showOnlySelected) { _, _ in page = 0; selectionAnchor = nil }
         .onChange(of: oldestFirst) { _, _ in page = 0; selectionAnchor = nil; thumbnails.supersede() }
@@ -217,7 +232,7 @@ struct PhoneCatalogView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 4)
         }
-        .id("\(category.rawValue)-\(type.rawValue)-\(currentPage)")
+        .id("\(category.storageCode)-\(type.storageCode)-\(currentPage)-\(oldestFirst)-\(showOnlySelected)")
         .overlay {
             if visible.isEmpty {
                 emptyResults
@@ -238,12 +253,12 @@ struct PhoneCatalogView: View {
 
     private func filterBar(months: [PhoneCatalogMonth], pageAssets: [PhoneCatalogAsset]) -> some View {
         HStack(spacing: 12) {
-            Picker("Категория", selection: $category) {
+            Picker("Категория", selection: Binding(get: { category }, set: { category = $0 })) {
                 ForEach(PhoneCatalogCategory.allCases) { item in Text(item.rawValue).tag(item) }
             }
             .labelsHidden()
             .frame(width: 170)
-            Picker("Тип", selection: $type) {
+            Picker("Тип", selection: Binding(get: { type }, set: { type = $0 })) {
                 ForEach(PhoneCatalogTypeFilter.allCases) { item in Text(item.rawValue).tag(item) }
             }
             .labelsHidden()
@@ -571,7 +586,8 @@ struct PhoneCatalogView: View {
         .buttonStyle(.plain)
         .contextMenu {
             Button("Просмотр…") {
-                previewIndex = currentPageAssets.firstIndex { $0.id == asset.id }
+                previewAssets = currentPageAssets
+                previewIndex = previewAssets.firstIndex { $0.id == asset.id }
             }
             Button(isSelected ? "Снять выбор" : "Выбрать") { toggle(asset) }
             Divider()
@@ -672,8 +688,8 @@ struct PhoneCatalogView: View {
     private var previewSheet: some View {
         if let snapshot = reader.snapshot {
             CatalogPreviewSheet(
-                assets: currentPageAssets,
-                index: Binding(get: { previewIndex ?? 0 }, set: { previewIndex = $0 }),
+                assets: previewAssets,
+                index: Binding(get: { min(previewIndex ?? 0, max(0, previewAssets.count - 1)) }, set: { previewIndex = $0 }),
                 image: { thumbnails.images[$0] },
                 isSelected: { selected.contains($0) },
                 availability: { id in

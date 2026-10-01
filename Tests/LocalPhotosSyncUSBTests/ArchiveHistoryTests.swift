@@ -276,6 +276,8 @@ final class VerifyArchivesCommandTests: XCTestCase {
 
         try Data("broken".utf8).write(to: history)
         XCTAssertEqual(LocalPhotosSyncCLI.verifyArchives(historyAt: history).exitCode, 2)
+        XCTAssertEqual(LocalPhotosSyncCLI.verifyArchives(historyAt: root.appendingPathComponent("typo.json")).exitCode, 2,
+                       "An explicit history path that does not exist is an error, not an empty success")
     }
 }
 
@@ -285,7 +287,9 @@ final class ArchiveProblemFilterTests: XCTestCase {
         XCTAssertTrue(ArchiveHistorySummary.isProblem(.missing(at: now), last: nil))
         XCTAssertTrue(ArchiveHistorySummary.isProblem(.failed(details: "x", at: now), last: ArchiveLastCheck(at: now, outcome: .passed)))
         XCTAssertFalse(ArchiveHistorySummary.isProblem(.passed(files: 1, at: now), last: ArchiveLastCheck(at: now, outcome: .missing)))
-        XCTAssertFalse(ArchiveHistorySummary.isProblem(.checking, last: ArchiveLastCheck(at: now, outcome: .failed)))
+        XCTAssertTrue(ArchiveHistorySummary.isProblem(.checking, last: ArchiveLastCheck(at: now, outcome: .failed)),
+                      "Rows stay in the problems filter while being re-checked")
+        XCTAssertFalse(ArchiveHistorySummary.isProblem(.checking, last: nil))
         XCTAssertTrue(ArchiveHistorySummary.isProblem(nil, last: ArchiveLastCheck(at: now, outcome: .failed)))
         XCTAssertFalse(ArchiveHistorySummary.isProblem(nil, last: nil))
     }
@@ -305,5 +309,28 @@ final class ArchiveDestinationTests: XCTestCase {
         XCTAssertFalse(ArchiveDestination.isInICloudDrive(local, home: home))
         XCTAssertFalse(ArchiveDestination.isInICloudDrive(home.appendingPathComponent("Library/Mobile DocumentsX"), home: home),
                        "Only the folder itself and its contents count, not a sibling with the same prefix")
+    }
+}
+
+final class ArchiveStaleTests: XCTestCase {
+    func testStaleArchivesAreNeverCheckedOrOlderThanLimit() {
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let fresh = ArchiveRecord(id: UUID(), path: "/a", recordedAt: now, source: .catalog,
+                                  lastCheck: ArchiveLastCheck(at: now.addingTimeInterval(-2 * 86_400), outcome: .passed))
+        let old = ArchiveRecord(id: UUID(), path: "/b", recordedAt: now, source: .catalog,
+                                lastCheck: ArchiveLastCheck(at: now.addingTimeInterval(-10 * 86_400), outcome: .failed))
+        let never = ArchiveRecord(id: UUID(), path: "/c", recordedAt: now, source: .usbImport)
+        XCTAssertEqual(ArchiveHistoryStore.staleIDs(in: [fresh, old, never], olderThanDays: 7, now: now), [old.id, never.id])
+        XCTAssertEqual(ArchiveHistoryStore.staleIDs(in: [fresh, old, never], olderThanDays: 1, now: now), [fresh.id, old.id, never.id])
+    }
+}
+
+/// Renders the Settings window for visual review (needs `LPS_RENDER_DIR`).
+@MainActor
+final class SettingsRenderTests: XCTestCase {
+    func testRendersSettings() throws {
+        let output = try ScreenRenderer.outputDirectory()
+        try ScreenRenderer.render(SettingsView(), size: CGSize(width: 480, height: 560))
+            .write(to: output.appendingPathComponent("settings.png"))
     }
 }

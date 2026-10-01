@@ -18,8 +18,8 @@ final class TransferAttention {
 
     func observe(exporter: PhoneAssetExporter, camera: CameraStore) {
         guard subscriptions.isEmpty else { return }
-        Publishers.CombineLatest4(exporter.$isExporting, camera.$importing, camera.$importProcessed, camera.$importTotal)
-            .receive(on: RunLoop.main)
+        Publishers.CombineLatest4(exporter.$isTransferring, camera.$importing, camera.$importProcessed, camera.$importTotal)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] exporting, importing, processed, total in
                 guard let self else { return }
                 MainActor.assumeIsolated {

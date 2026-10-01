@@ -191,7 +191,7 @@ final class ArchiveHistoryStore: ObservableObject {
         guard subscriptions.isEmpty else { return }
         exporter.$outputFolder
             .compactMap { $0 }
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] folder in
                 guard let self else { return }
                 MainActor.assumeIsolated { self.record(folder, source: .catalog) }
@@ -201,7 +201,7 @@ final class ArchiveHistoryStore: ObservableObject {
             .removeDuplicates()
             .dropFirst()
             .filter { !$0 }
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self, weak camera] _ in
                 guard let self, let camera else { return }
                 MainActor.assumeIsolated {
@@ -240,7 +240,9 @@ final class ArchiveHistoryStore: ObservableObject {
             let loaded = await Task.detached(priority: .utility) {
                 pending.compactMap { id, folder in ArchiveReportSummary.read(folder: folder).map { (id, $0) } }
             }.value
-            for (id, summary) in loaded where records.contains(where: { $0.id == id }) { summaries[id] = summary }
+            for (id, summary) in loaded where summaries[id] == nil && records.contains(where: { $0.id == id }) {
+                summaries[id] = summary
+            }
         }
     }
 
@@ -274,6 +276,17 @@ final class ArchiveHistoryStore: ObservableObject {
 
     func verifyAll() { verify(records.map(\.id)) }
 
+    /// Archives never checked, or last checked more than `days` days before `now`.
+    static func staleIDs(in records: [ArchiveRecord], olderThanDays days: Int, now: Date = Date()) -> [UUID] {
+        let limit = now.addingTimeInterval(-TimeInterval(max(0, days)) * 86_400)
+        return records.filter { ($0.lastCheck?.at ?? .distantPast) < limit }.map(\.id)
+    }
+
+    /// Re-checks stale archives in the background; used at launch when enabled in Settings.
+    func verifyStale(olderThanDays days: Int) {
+        verify(Self.staleIDs(in: records, olderThanDays: days))
+    }
+
     func verify(_ ids: [UUID]) {
         guard !isChecking else { return }
         let targets = records.filter { ids.contains($0.id) }
@@ -288,10 +301,10 @@ final class ArchiveHistoryStore: ObservableObject {
                 guard let index = records.firstIndex(where: { $0.id == record.id }) else { continue }
                 checks[record.id] = state
                 records[index].lastCheck = ArchiveLastCheck(state)
+                persist()
                 summaries[record.id] = await Task.detached(priority: .utility) { ArchiveReportSummary.read(folder: folder) }.value
             }
             isChecking = false
-            persist()
         }
     }
 

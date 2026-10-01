@@ -12,9 +12,16 @@ struct LocalPhotosSyncApp: App {
                 .onAppear {
                     history.observe(exporter: exporter, camera: store)
                     attention.observe(exporter: exporter, camera: store)
+                    if UserDefaults.standard.bool(forKey: SettingsKeys.autoVerifyArchives) {
+                        let days = UserDefaults.standard.integer(forKey: SettingsKeys.autoVerifyDays)
+                        history.verifyStale(olderThanDays: days > 0 ? days : 7)
+                    }
                 }
         }
         .defaultSize(width: 1060, height: 760)
+        Settings {
+            SettingsView()
+        }
     }
 }
 

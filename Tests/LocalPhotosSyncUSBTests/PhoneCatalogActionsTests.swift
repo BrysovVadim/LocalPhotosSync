@@ -111,6 +111,17 @@ final class PhoneCatalogActionsTests: XCTestCase {
         XCTAssertTrue(busy.notReadable.isEmpty && busy.unsaved.isEmpty)
     }
 
+    func testFilterStorageCodesRoundTripAndFallBack() {
+        for category in PhoneCatalogCategory.allCases {
+            XCTAssertEqual(PhoneCatalogCategory(storageCode: category.storageCode), category)
+        }
+        for type in PhoneCatalogTypeFilter.allCases {
+            XCTAssertEqual(PhoneCatalogTypeFilter(storageCode: type.storageCode), type)
+        }
+        XCTAssertEqual(PhoneCatalogCategory(storageCode: "Медиатека"), .mediaLibrary, "Unknown codes fall back to the default")
+        XCTAssertEqual(PhoneCatalogTypeFilter(storageCode: ""), .all)
+    }
+
     func testTileSizeSteps() {
         XCTAssertEqual(PhoneCatalogTileSize.smaller(than: 168), 132)
         XCTAssertNil(PhoneCatalogTileSize.smaller(than: 132))

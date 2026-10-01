@@ -19,8 +19,8 @@ struct ArchiveHistorySummary: Equatable {
     static func isProblem(_ state: ArchiveCheckState?, last: ArchiveLastCheck?) -> Bool {
         switch state ?? .unchecked {
         case .failed, .missing: return true
-        case .passed, .checking: return false
-        case .unchecked: return last?.outcome == .failed || last?.outcome == .missing
+        case .passed: return false
+        case .checking, .unchecked: return last?.outcome == .failed || last?.outcome == .missing
         }
     }
 

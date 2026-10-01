@@ -81,6 +81,36 @@ struct PhoneCatalogFollowUps: Equatable {
     }
 }
 
+/// Stable identifiers for remembered filters; the raw values are display labels and may change.
+extension PhoneCatalogCategory {
+    var storageCode: String {
+        switch self {
+        case .mediaLibrary: "mediaLibrary"
+        case .allRecords: "allRecords"
+        case .otherRecords: "otherRecords"
+        case .unknownScope: "unknownScope"
+        }
+    }
+
+    init(storageCode: String) {
+        self = Self.allCases.first { $0.storageCode == storageCode } ?? .mediaLibrary
+    }
+}
+
+extension PhoneCatalogTypeFilter {
+    var storageCode: String {
+        switch self {
+        case .all: "all"
+        case .photos: "photos"
+        case .videos: "videos"
+        }
+    }
+
+    init(storageCode: String) {
+        self = Self.allCases.first { $0.storageCode == storageCode } ?? .all
+    }
+}
+
 /// Card sizes for the catalog grid, smallest first.
 enum PhoneCatalogTileSize {
     static let steps: [Double] = [132, 168, 224]
