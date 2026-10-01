@@ -245,13 +245,31 @@ final class CatalogProgressTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let file = root.appendingPathComponent("progress.json")
+        let archive = root.appendingPathComponent("archive", isDirectory: true)
+        try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: false)
+        let archivePath = archive.resolvingSymlinksInPath().standardizedFileURL.path
         let store = CatalogProgressStore(fileURL: file)
-        store.record([42], snapshotFolder: URL(fileURLWithPath: "/snap/a"), archive: URL(fileURLWithPath: "/archives/run"))
+        store.record([42], snapshotFolder: URL(fileURLWithPath: "/snap/a"), archive: archive)
+        store.record([43], snapshotFolder: URL(fileURLWithPath: "/snap/a"), archive: root.appendingPathComponent("gone"))
         let reloaded = CatalogProgressStore(fileURL: file)
-        XCTAssertEqual(reloaded.savedIDs(in: URL(fileURLWithPath: "/snap/a")), [42: "/archives/run"])
+        XCTAssertEqual(reloaded.savedIDs(in: URL(fileURLWithPath: "/snap/a")), [42: archivePath],
+                       "Marks whose archive folder no longer exists do not count")
         let text = try String(contentsOf: file, encoding: .utf8)
         XCTAssertFalse(text.contains(".HEIC"))
         let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+
+    @MainActor
+    func testUnreadableProgressIsKeptAside() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("catalog-progress.json")
+        try Data("{ not json".utf8).write(to: file)
+        let store = CatalogProgressStore(fileURL: file)
+        XCTAssertTrue(store.progress.snapshots.isEmpty)
+        let aside = try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasPrefix("catalog-progress.unreadable-") }
+        XCTAssertEqual(aside.count, 1)
     }
 }

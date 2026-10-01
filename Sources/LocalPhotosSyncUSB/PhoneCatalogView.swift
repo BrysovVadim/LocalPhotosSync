@@ -63,7 +63,11 @@ struct PhoneCatalogView: View {
     private func filteredAssets(in snapshot: PhoneCatalogSnapshot) -> [PhoneCatalogAsset] {
         var assets = DisplayOrder.apply(snapshot.assets(category: category, type: type, search: search),
                                         oldestFirst: oldestFirst)
-        if hideSaved { assets.removeAll { isSaved($0.id, in: snapshot) } }
+        if hideSaved {
+            let earlier = savedEarlier(in: snapshot)
+            let session = exporter.sourceFolder == snapshot.sourceFolder ? exporter.savedAssetIDs : []
+            assets.removeAll { earlier[$0.id] != nil || session.contains($0.id) }
+        }
         return showOnlySelected ? assets.filter { selected.contains($0.id) } : assets
     }
 
@@ -345,18 +349,19 @@ struct PhoneCatalogView: View {
     private var emptyResults: some View {
         let title: String = search.isEmpty ? "Записей нет" : "Ничего не найдено"
         let detail: String = search.isEmpty
-            ? "В этой категории и типе записей нет."
+            ? (hideSaved ? "Несохранённых записей в этой категории и типе нет: сохранённые скрыты." : "В этой категории и типе записей нет.")
             : "Нет файлов, имя которых содержит «\(search)»."
         return ContentUnavailableView {
             Label(title, systemImage: search.isEmpty ? "photo.on.rectangle.angled" : "magnifyingglass")
         } description: {
             Text(detail)
         } actions: {
-            if !search.isEmpty || type != .all || category != .mediaLibrary {
+            if !search.isEmpty || type != .all || category != .mediaLibrary || hideSaved {
                 Button("Сбросить фильтры") {
                     search = ""
                     type = .all
                     category = .mediaLibrary
+                    hideSaved = false
                 }
             }
         }

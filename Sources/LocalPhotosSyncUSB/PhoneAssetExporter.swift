@@ -55,6 +55,8 @@ private struct PhoneAssetExportOutcome: Sendable {
     let savedAssetIDs: Set<Int64>
     let failedAssetIDs: Set<Int64>
     let message: String
+    /// True only when the whole run's archive was written as complete and passed verification.
+    var archiveVerified = false
 }
 
 private struct VerifiedLivePhotoProof {
@@ -126,6 +128,8 @@ final class PhoneAssetExporter: ObservableObject {
     @Published private(set) var isExporting = false
     /// True only while files are being copied (not during availability checks).
     @Published private(set) var isTransferring = false
+    /// Whether the last transfer's archive was complete and verified; marks of saved records rely on it.
+    @Published private(set) var lastArchiveVerified = false
     @Published private(set) var message: String?
     @Published private(set) var outputFolder: URL?
     @Published private(set) var exportedCount = 0
@@ -219,6 +223,7 @@ final class PhoneAssetExporter: ObservableObject {
         }
         isExporting = true
         isTransferring = true
+        lastArchiveVerified = false
         outputFolder = nil
         exportedCount = 0
         failedCount = 0
@@ -243,6 +248,7 @@ final class PhoneAssetExporter: ObservableObject {
             failedCount = result.failed
             savedAssetIDs = result.savedAssetIDs
             failedAssetIDs = result.failedAssetIDs
+            lastArchiveVerified = result.archiveVerified
             message = result.message
             activeCancellation = nil
             isExporting = false
@@ -267,6 +273,7 @@ final class PhoneAssetExporter: ObservableObject {
         }
         isExporting = true
         isTransferring = true
+        lastArchiveVerified = false
         message = "Проверяем и сохраняем пару Live Photo…"
         let cancellation = PhoneAssetExportCancellation()
         activeCancellation = cancellation
@@ -285,6 +292,7 @@ final class PhoneAssetExporter: ObservableObject {
             failedCount = result.failed
             savedAssetIDs = result.savedAssetIDs
             failedAssetIDs = result.failedAssetIDs
+            lastArchiveVerified = result.archiveVerified
             message = result.message
             activeCancellation = nil
             isExporting = false
@@ -443,7 +451,7 @@ final class PhoneAssetExporter: ObservableObject {
         }
         return PhoneAssetExportOutcome(folder: runFolder, exported: savedIDs.count, failed: failed,
                                        savedAssetIDs: savedIDs, failedAssetIDs: Set(assets.map(\.id)).subtracting(savedIDs),
-                                       message: finalMessage)
+                                       message: finalMessage, archiveVerified: verificationIsComplete)
     }
 
     nonisolated private static func performLivePhotoExport(
@@ -540,7 +548,8 @@ final class PhoneAssetExporter: ObservableObject {
             }
             return PhoneAssetExportOutcome(folder: runFolder, exported: 1, failed: 0,
                 savedAssetIDs: [asset.id], failedAssetIDs: [],
-                message: "Пара Live Photo сохранена и проверена локально. Полнота облачной медиатеки не подтверждена.")
+                message: "Пара Live Photo сохранена и проверена локально. Полнота облачной медиатеки не подтверждена.",
+                archiveVerified: true)
         } catch {
             errors.append(errorMessage(error, index: 1))
             try? writeReport(startedAt: startedAt, files: files, errors: errors, expected: 1, completed: false, to: runFolder)

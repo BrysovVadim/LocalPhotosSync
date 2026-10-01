@@ -41,8 +41,11 @@ final class PhoneCatalogViewRenderTests: XCTestCase {
             .write(to: output.appendingPathComponent("catalog-after-check.png"))
 
         let progress = CatalogProgressStore(fileURL: nil)
-        progress.record(Set(ids.dropFirst(2).prefix(4)), snapshotFolder: snapshot.sourceFolder,
-                        archive: URL(fileURLWithPath: "/Users/me/Архив фото/LocalPhotosSync-2026-09-20T10-00-00Z-1A2B3C4D"))
+        let archive = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalPhotosSync-2026-09-20T10-00-00Z-1A2B3C4D-\(UUID().uuidString.prefix(6))", isDirectory: true)
+        try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        progress.record(Set(ids.dropFirst(2).prefix(4)), snapshotFolder: snapshot.sourceFolder, archive: archive)
         let savedView = PhoneCatalogView(exporter: PhoneAssetExporter(), reader: PhoneCatalogReader(fixedSnapshot: snapshot),
                                          progress: progress)
         try ScreenRenderer.render(savedView, size: CGSize(width: 1060, height: 760))
