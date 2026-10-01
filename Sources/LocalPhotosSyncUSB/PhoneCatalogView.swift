@@ -11,6 +11,7 @@ struct PhoneCatalogView: View {
     @State private var selectionAnchor: Int64?
     @State private var showOnlySelected = false
     @AppStorage("catalog.oldestFirst") private var oldestFirst = false
+    @State private var previewIndex: Int?
     @State private var category = PhoneCatalogCategory.mediaLibrary
     @State private var type = PhoneCatalogTypeFilter.all
     @State private var search = ""
@@ -91,6 +92,9 @@ struct PhoneCatalogView: View {
             selected.removeAll()
             selectionAnchor = nil
             thumbnails.reset()
+        }
+        .sheet(isPresented: Binding(get: { previewIndex != nil }, set: { if !$0 { previewIndex = nil } })) {
+            previewSheet
         }
         .task(id: autoLoadKey) {
             // One debounced trigger: typing, fast paging and batch hand-offs coalesce into a single load.
@@ -557,6 +561,9 @@ struct PhoneCatalogView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+            Button("Просмотр…") {
+                previewIndex = currentPageAssets.firstIndex { $0.id == asset.id }
+            }
             Button(isSelected ? "Снять выбор" : "Выбрать") { toggle(asset) }
             Divider()
             Button("Проверить этот файл") {
@@ -651,6 +658,34 @@ struct PhoneCatalogView: View {
     }
 
     // MARK: - Actions
+
+    @ViewBuilder
+    private var previewSheet: some View {
+        if let snapshot = reader.snapshot {
+            CatalogPreviewSheet(
+                assets: currentPageAssets,
+                index: Binding(get: { previewIndex ?? 0 }, set: { previewIndex = $0 }),
+                image: { thumbnails.images[$0] },
+                isSelected: { selected.contains($0) },
+                availability: { id in
+                    guard exporter.availabilitySourceFolder == snapshot.sourceFolder,
+                          let check = exporter.availabilityResults[id],
+                          check.sourceFolder == snapshot.sourceFolder else { return nil }
+                    return check
+                },
+                canLoadPreview: { thumbnails.canLoad([$0]) },
+                isBusy: isBusy,
+                actions: CatalogPreviewActions(
+                    toggleSelection: { toggle($0) },
+                    loadPreview: { thumbnails.load([$0], snapshot: snapshot) },
+                    check: { exporter.checkAvailability(assets: [$0], snapshot: snapshot) },
+                    save: { asset in
+                        previewIndex = nil
+                        DispatchQueue.main.async { chooseExportFolder(assets: [asset], snapshot: snapshot) }
+                    },
+                    close: { previewIndex = nil }))
+        }
+    }
 
     /// Everything that can make an automatic preview load possible or necessary.
     private var autoLoadKey: String {

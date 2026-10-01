@@ -50,6 +50,25 @@ final class PhoneCatalogViewRenderTests: XCTestCase {
             .write(to: output.appendingPathComponent("catalog-large-tiles.png"))
     }
 
+    func testRendersPreviewSheet() throws {
+        let output = try ScreenRenderer.outputDirectory()
+        let assets = Array(Self.fixtureSnapshot().assets(category: .mediaLibrary).prefix(24))
+        let folder = Self.fixtureSnapshot().sourceFolder
+        let check = PhoneAssetAvailabilityCheck(state: .mainFileReadable(bytes: 2_400_000), sourceFolder: folder,
+                                                checkedAt: Date(timeIntervalSince1970: 1_790_000_000))
+        let cases: [(String, Int, Bool)] = [("preview-with-image", 2, true), ("preview-not-loaded", 3, false)]
+        for (name, index, withImage) in cases {
+            let sheet = CatalogPreviewSheet(
+                assets: assets, index: .constant(index),
+                image: { withImage ? UsbImportFixtures.thumbnail(for: "asset-\($0)") : nil },
+                isSelected: { $0 == assets[2].id },
+                availability: { withImage ? check : nil },
+                canLoadPreview: { _ in true }, isBusy: false, actions: CatalogPreviewActions())
+            try ScreenRenderer.render(sheet, size: CGSize(width: 640, height: 600))
+                .write(to: output.appendingPathComponent("\(name).png"))
+        }
+    }
+
     private static func fixtureSnapshot() -> PhoneCatalogSnapshot {
         let start = Date(timeIntervalSince1970: 1_790_000_000)
         var assets: [PhoneCatalogAsset] = []
