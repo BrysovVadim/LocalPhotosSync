@@ -164,12 +164,6 @@ final class PhoneAssetExporter: ObservableObject {
 
     func checkAvailability(assets: [PhoneCatalogAsset], snapshot: PhoneCatalogSnapshot) {
         guard !isExporting else { return }
-        let sameSnapshot = availabilitySourceFolder?.resolvingSymlinksInPath().standardizedFileURL ==
-            snapshot.sourceFolder.resolvingSymlinksInPath().standardizedFileURL
-        if !sameSnapshot { availabilityResults = [:] }
-        let selectedIDs = Set(assets.map(\.id))
-        availabilityResults = availabilityResults.filter { !selectedIDs.contains($0.key) }
-        availabilitySourceFolder = snapshot.sourceFolder
         guard !assets.isEmpty, assets.count <= 12,
               Set(assets.map(\.id)).count == assets.count,
               assets.allSatisfy({ $0.id > 0 && $0.isVisibleLibraryItem &&
@@ -177,6 +171,12 @@ final class PhoneAssetExporter: ObservableObject {
             availabilityMessage = "Выберите от 1 до 12 видимых фото или видео из медиатеки."
             return
         }
+        let sameSnapshot = availabilitySourceFolder?.resolvingSymlinksInPath().standardizedFileURL ==
+            snapshot.sourceFolder.resolvingSymlinksInPath().standardizedFileURL
+        if !sameSnapshot { availabilityResults = [:] }
+        let selectedIDs = Set(assets.map(\.id))
+        availabilityResults = availabilityResults.filter { !selectedIDs.contains($0.key) }
+        availabilitySourceFolder = snapshot.sourceFolder
         isExporting = true
         availabilityMessage = "Проверяем доступность файлов…"
         let cancellation = PhoneAssetExportCancellation()
@@ -192,14 +192,15 @@ final class PhoneAssetExporter: ObservableObject {
                 cancellation.cancel()
             }
             for (assetID, check) in checks { availabilityResults[assetID] = check }
+            let summary = Self.availabilitySummary(checks.values.map(\.state), total: assets.count)
             if cancellation.isCancelled {
-                availabilityMessage = "Проверка доступности отменена; непроверенные записи остались без результата."
+                availabilityMessage = "Проверка отменена. \(summary) Непроверенные записи остались без результата."
             } else if checks.values.contains(where: { $0.state == .failed }) {
-                availabilityMessage = "Не все файлы удалось проверить; это не означает, что они находятся в iCloud."
+                availabilityMessage = "\(summary) Ошибка проверки не означает, что файл находится в iCloud."
             } else if checks.count < assets.count {
-                availabilityMessage = "Общий лимит времени проверки истёк; непроверенные записи остались без результата."
+                availabilityMessage = "Общий лимит времени проверки истёк. \(summary) Непроверенные записи остались без результата."
             } else {
-                availabilityMessage = "Проверка доступности завершена. Она проверяет только чтение заголовка файла."
+                availabilityMessage = "\(summary) Проверяется только чтение заголовка основного файла."
             }
             activeCancellation = nil
             isExporting = false
@@ -224,6 +225,7 @@ final class PhoneAssetExporter: ObservableObject {
         isExporting = true
         isTransferring = true
         lastArchiveVerified = false
+        availabilityMessage = nil
         outputFolder = nil
         exportedCount = 0
         failedCount = 0
@@ -249,6 +251,7 @@ final class PhoneAssetExporter: ObservableObject {
             savedAssetIDs = result.savedAssetIDs
             failedAssetIDs = result.failedAssetIDs
             lastArchiveVerified = result.archiveVerified
+            for assetID in result.savedAssetIDs { availabilityResults[assetID] = nil }
             message = result.message
             activeCancellation = nil
             isExporting = false
@@ -274,6 +277,7 @@ final class PhoneAssetExporter: ObservableObject {
         isExporting = true
         isTransferring = true
         lastArchiveVerified = false
+        availabilityMessage = nil
         message = "Проверяем и сохраняем пару Live Photo…"
         let cancellation = PhoneAssetExportCancellation()
         activeCancellation = cancellation
@@ -293,6 +297,7 @@ final class PhoneAssetExporter: ObservableObject {
             savedAssetIDs = result.savedAssetIDs
             failedAssetIDs = result.failedAssetIDs
             lastArchiveVerified = result.archiveVerified
+            for assetID in result.savedAssetIDs { availabilityResults[assetID] = nil }
             message = result.message
             activeCancellation = nil
             isExporting = false
@@ -766,6 +771,22 @@ final class PhoneAssetExporter: ObservableObject {
         return rows.count <= 64 && rows.allSatisfy { row in
             Set(row.keys) == keys && row.values.allSatisfy { isNullableInteger($0) }
         }
+    }
+
+    nonisolated static func availabilitySummary(_ states: [PhoneAssetAvailabilityState], total: Int) -> String {
+        var readable = 0, missing = 0, oversized = 0, failed = 0
+        for state in states {
+            switch state {
+            case .mainFileReadable: readable += 1
+            case .mainFileMissing: missing += 1
+            case .exceedsCopyLimit: oversized += 1
+            case .failed: failed += 1
+            }
+        }
+        var parts = ["есть на iPhone: \(readable)", "не найдено: \(missing)"]
+        if oversized > 0 { parts.append("больше лимита: \(oversized)") }
+        if failed > 0 { parts.append("ошибок: \(failed)") }
+        return "Проверено \(states.count) из \(total): " + parts.joined(separator: ", ") + "."
     }
 
     nonisolated static func performAvailabilityCheck(

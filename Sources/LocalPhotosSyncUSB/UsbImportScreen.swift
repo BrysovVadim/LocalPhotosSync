@@ -271,7 +271,7 @@ struct UsbImportScreen: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .padding(.horizontal, 20)
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: tileSize), spacing: 12)], spacing: 12,
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: tileSize), spacing: 12, alignment: .top)], spacing: 12,
                               pinnedViews: [.sectionHeaders]) {
                         ForEach(Array(PhoneCatalogTimeline.sections(of: visible, date: \.date).enumerated()), id: \.offset) { _, section in
                             Section {

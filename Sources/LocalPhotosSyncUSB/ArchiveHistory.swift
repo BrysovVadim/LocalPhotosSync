@@ -87,7 +87,8 @@ struct ArchiveReportSummary: Equatable, Sendable {
 
     static func read(folder: URL) -> ArchiveReportSummary? {
         let url = folder.appendingPathComponent("import-report.json")
-        guard let data = try? Data(contentsOf: url), data.count <= 32 * 1024 * 1024,
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 32 * 1024 * 1024,
+              let data = try? Data(contentsOf: url), data.count <= 32 * 1024 * 1024,
               let report = try? JSONDecoder().decode(Report.self, from: data) else { return nil }
         let files = report.files ?? []
         let bytes = files.reduce(Int64(0)) { $0 + max(0, $1.savedBytes) } +

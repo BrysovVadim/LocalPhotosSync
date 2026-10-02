@@ -253,7 +253,7 @@ struct PhoneCatalogView: View {
         .padding(.bottom, 10)
 
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: tileSize), spacing: 12)], spacing: 12,
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: tileSize), spacing: 12, alignment: .top)], spacing: 12,
                       pinnedViews: [.sectionHeaders]) {
                 ForEach(Array(PhoneCatalogTimeline.sections(of: pageAssets).enumerated()), id: \.offset) { _, section in
                     Section {

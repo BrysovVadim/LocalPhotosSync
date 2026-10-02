@@ -46,6 +46,21 @@ final class ArchiveReceiptTests: XCTestCase {
         XCTAssertEqual(decoded.errors, ["clip.mov: interrupted"])
     }
 
+    func testOversizedReportIsRefusedWithoutReading() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let report = directory.appendingPathComponent("import-report.json")
+        XCTAssertTrue(FileManager.default.createFile(atPath: report.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: report)
+        try handle.truncate(atOffset: 32 * 1024 * 1024 + 1)
+        try handle.close()
+
+        XCTAssertThrowsError(try ArchiveVerification.verify(reportAt: report)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("слишком большой"), error.localizedDescription)
+        }
+    }
+
     func testExistingReportVerifiesAfterArchiveIsMoved() throws {
         let original = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let archive = original.appendingPathComponent("archive", isDirectory: true)

@@ -162,6 +162,66 @@ final class PhoneAssetExporterTests: XCTestCase {
     }
 
     @MainActor
+    func testAvailabilityMessageSummarizesCountsAndClearsCheckingState() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let assets = (51...54).map { makeAsset(id: Int64($0), filename: "IMG_\($0).HEIC", type: .photo) }
+        let sequence = AvailabilitySequence([.mainFileReadable(bytes: 100), .mainFileMissing, .mainFileMissing,
+                                             .exceedsCopyLimit(bytes: 40 * 1024 * 1024)])
+        let exporter = PhoneAssetExporter(availabilityProbeRunner: { _, _, _, _ in sequence.next() })
+
+        exporter.checkAvailability(assets: assets, snapshot: fixture.snapshot)
+        XCTAssertFalse(exporter.isTransferring)
+        await waitForAvailability(exporter)
+
+        XCTAssertFalse(exporter.isExporting)
+        let message = try XCTUnwrap(exporter.availabilityMessage)
+        XCTAssertTrue(message.contains("Проверено 4 из 4"), message)
+        XCTAssertTrue(message.contains("есть на iPhone: 1"), message)
+        XCTAssertTrue(message.contains("не найдено: 2"), message)
+        XCTAssertTrue(message.contains("больше лимита: 1"), message)
+        XCTAssertFalse(message.contains("ошибок"), message)
+    }
+
+    @MainActor
+    func testInvalidAvailabilitySelectionKeepsPreviousResults() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let asset = makeAsset(id: 55, filename: "kept.heic", type: .photo)
+        let exporter = PhoneAssetExporter(availabilityProbeRunner: { _, _, _, _ in .mainFileMissing })
+        exporter.checkAvailability(assets: [asset], snapshot: fixture.snapshot)
+        await waitForAvailability(exporter)
+
+        let tooMany = (60...72).map { makeAsset(id: Int64($0), filename: "IMG_\($0).HEIC", type: .photo) }
+        exporter.checkAvailability(assets: [asset] + tooMany, snapshot: fixture.snapshot)
+
+        XCTAssertFalse(exporter.isExporting)
+        XCTAssertEqual(exporter.availabilityResults[55]?.state, .mainFileMissing)
+    }
+
+    @MainActor
+    func testSavedAssetDropsStaleAvailabilityResultAndCheckMessage() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let saved = makeAsset(id: 56, filename: "IMG_0056.HEIC", type: .photo)
+        let missing = makeAsset(id: 57, filename: "IMG_0057.HEIC", type: .photo)
+        let exporter = PhoneAssetExporter(probeRunner: Self.fakeRunner(
+            cacheRoot: fixture.cacheRoot,
+            behaviors: [56: .copy(Data("downloaded-later".utf8), corruptHash: false), 57: .fail("asset_unavailable")]
+        ), availabilityProbeRunner: { _, _, _, _ in .mainFileMissing })
+        exporter.checkAvailability(assets: [saved, missing], snapshot: fixture.snapshot)
+        await waitForAvailability(exporter)
+
+        exporter.export(assets: [saved, missing], snapshot: fixture.snapshot, destination: fixture.destination)
+        XCTAssertNil(exporter.availabilityMessage)
+        await waitForCompletion(exporter)
+
+        XCTAssertEqual(exporter.savedAssetIDs, [56])
+        XCTAssertNil(exporter.availabilityResults[56])
+        XCTAssertEqual(exporter.availabilityResults[57]?.state, .mainFileMissing)
+    }
+
+    @MainActor
     func testSuccessfulCopyProducesVerifiedArchiveAndRetainsFilenameExtension() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -615,7 +675,8 @@ final class PhoneAssetExporterTests: XCTestCase {
             case .fail(let status): return .failed(status: status)
             case .copy(let bytes, let corruptHash):
                 do {
-                    let filenameByID: [Int64: String] = [41: "IMG_0041.MOV", 52: "photo.heic", 61: "first.heic", 62: "second.mov"]
+                    let filenameByID: [Int64: String] = [41: "IMG_0041.MOV", 52: "photo.heic", 61: "first.heic", 62: "second.mov",
+                                                                  56: "IMG_0056.HEIC"]
                     guard let filename = filenameByID[assetID] else { return .failed(status: "fixture_failure") }
                     let folder = cacheRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
                     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false,

@@ -122,6 +122,9 @@ struct ArchiveVerification: Sendable {
 
     static func verify(reportAt reportURL: URL) throws -> ArchiveVerification {
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        // Reports come from any folder the user adds, so never read an oversized file into memory.
+        guard let size = try reportURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size <= 32 * 1024 * 1024 else { throw VerificationFailure.reportTooLarge }
         let report = try decoder.decode(DecodedReport.self, from: Data(contentsOf: reportURL))
         let root = reportURL.deletingLastPathComponent().standardizedFileURL
         var failures = report.errors.map { "Импорт: \($0)" }; var verified = 0
@@ -184,8 +187,14 @@ struct ArchiveVerification: Sendable {
     private struct DecodedFile: Decodable { let sourceName: String; let savedPath: String; let relativePath: String?; let savedBytes: Int64; let sha256: String }
     private struct DecodedInventory: Decodable { let path: String; let bytes: Int64; let sha256: String }
     private enum VerificationFailure: LocalizedError {
-        case unsafePath, hashMismatch
-        var errorDescription: String? { switch self { case .unsafePath: return "Отчёт содержит небезопасный путь."; case .hashMismatch: return "Контрольная сумма не совпадает." } }
+        case unsafePath, hashMismatch, reportTooLarge
+        var errorDescription: String? {
+            switch self {
+            case .unsafePath: return "Отчёт содержит небезопасный путь."
+            case .hashMismatch: return "Контрольная сумма не совпадает."
+            case .reportTooLarge: return "Файл отчёта слишком большой (больше 32 МБ)."
+            }
+        }
     }
 }
 
