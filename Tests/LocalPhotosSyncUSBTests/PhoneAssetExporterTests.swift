@@ -165,9 +165,13 @@ final class PhoneAssetExporterTests: XCTestCase {
     func testAvailabilityMessageSummarizesCountsAndClearsCheckingState() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let assets = (51...54).map { makeAsset(id: Int64($0), filename: "IMG_\($0).HEIC", type: .photo) }
-        let sequence = AvailabilitySequence([.mainFileReadable(bytes: 100), .mainFileMissing, .mainFileMissing,
-                                             .exceedsCopyLimit(bytes: 40 * 1024 * 1024)])
+        let assets: [PhoneCatalogAsset] = (51...54).map { (id: Int) in
+            makeAsset(id: Int64(id), filename: "IMG_\(id).HEIC", type: .photo)
+        }
+        let oversized: Int64 = 40 * 1024 * 1024
+        let results: [PhoneAssetAvailabilityProbeResult] = [.mainFileReadable(bytes: 100), .mainFileMissing,
+                                                            .mainFileMissing, .exceedsCopyLimit(bytes: oversized)]
+        let sequence = AvailabilitySequence(results)
         let exporter = PhoneAssetExporter(availabilityProbeRunner: { _, _, _, _ in sequence.next() })
 
         exporter.checkAvailability(assets: assets, snapshot: fixture.snapshot)
@@ -175,7 +179,7 @@ final class PhoneAssetExporterTests: XCTestCase {
         await waitForAvailability(exporter)
 
         XCTAssertFalse(exporter.isExporting)
-        let message = try XCTUnwrap(exporter.availabilityMessage)
+        let message: String = try XCTUnwrap(exporter.availabilityMessage)
         XCTAssertTrue(message.contains("Проверено 4 из 4"), message)
         XCTAssertTrue(message.contains("есть на iPhone: 1"), message)
         XCTAssertTrue(message.contains("не найдено: 2"), message)
@@ -192,7 +196,9 @@ final class PhoneAssetExporterTests: XCTestCase {
         exporter.checkAvailability(assets: [asset], snapshot: fixture.snapshot)
         await waitForAvailability(exporter)
 
-        let tooMany = (60...72).map { makeAsset(id: Int64($0), filename: "IMG_\($0).HEIC", type: .photo) }
+        let tooMany: [PhoneCatalogAsset] = (60...72).map { (id: Int) in
+            makeAsset(id: Int64(id), filename: "IMG_\(id).HEIC", type: .photo)
+        }
         exporter.checkAvailability(assets: [asset] + tooMany, snapshot: fixture.snapshot)
 
         XCTAssertFalse(exporter.isExporting)
