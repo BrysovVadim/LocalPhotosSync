@@ -41,7 +41,16 @@ jobs:
       - name: Build
         run: swift build -Xswiftc -warnings-as-errors
       - name: Tests
-        run: swift test
+        shell: bash
+        run: |
+          set +e
+          swift test 2>&1 | tee "$RUNNER_TEMP/swift-test.log"
+          status=${PIPESTATUS[0]}
+          # Logs need a GitHub sign-in; annotations are public, so surface the first failures there.
+          grep -E "error:|failed \(" "$RUNNER_TEMP/swift-test.log" | head -20 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit "$status"
       - name: Render screens
         run: LPS_RENDER_DIR="$PWD/.build/screens" swift test --filter 'RenderTests'
       - name: Upload screens
